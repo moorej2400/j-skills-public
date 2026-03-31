@@ -5,8 +5,8 @@
 It pairs with `teamwork-mcp` for lightweight realtime coordination:
 
 - one parent orchestrator
-- up to six specialized workers
-- one worktree per worker per phase
+- `solo` mode: up to six specialized workers with one worktree per worker per phase
+- `pair` mode: up to three paired specialties with one shared worktree per specialty pair per phase
 - parent-owned phase-end integration into `main`
 - worker-to-worker broadcast and DM messaging through MCP
 - worktree registration and git inspection through MCP
@@ -18,11 +18,14 @@ It pairs with `teamwork-mcp` for lightweight realtime coordination:
 The skill supports optional env defaults in the skill folder:
 
 - `TEAMWORK_WORKER_POOL`
+- `TEAMWORK_MODE`
 - `TEAMWORK_MAX_WORKERS`
 - `TEAMWORK_OUTPUT_DIR`
 - `TEAMWORK_POLL_SECONDS`
 
 `TEAMWORK_WORKER_POOL` supports repeated weighted entries and an optional `@reasoning_effort` suffix per entry, for example `copilot:claude-opus-latest@high`.
+
+`TEAMWORK_MODE` supports `solo` and `pair`, and defaults to `solo`.
 
 Prompt-provided values should override env defaults.
 

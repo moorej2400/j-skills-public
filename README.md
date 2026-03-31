@@ -19,7 +19,7 @@ MCP requirement: none.
 
 Run a parent-led implementation workflow where specialized workers each own a worktree, coordinate through an MCP session, and hand clean phase results back to the parent for integration.
 
-MCP requirement: yes. This skill expects a compatible `teamwork-mcp` server.
+MCP requirement: yes. This repo includes a compatible `teamwork-mcp` server.
 
 ## Repo Layout
 
@@ -37,6 +37,13 @@ j-skills-public/
     .env.template
     *-Teamwork.md
     ALTERNATIVE_DESIGNS.md
+  teamwork-mcp/
+    package.json
+    package-lock.json
+    tsconfig.json
+    src/
+    test/
+    README.md
 ```
 
 ## Using These Skills
@@ -92,7 +99,7 @@ Canonical source paths:
 - Result reporting: `tw_report_result`, `tw_list_results`
 - Checkpoints: `tw_checkpoint`, `tw_list_checkpoints`
 
-The original private monorepo uses a local `teamwork-mcp` TypeScript server. That server is not bundled here. If you wire this skill to your own implementation, keep the tool names and semantics compatible with the contract documented in [`teamwork/SKILL.md`](./teamwork/SKILL.md).
+This repo now bundles the same `teamwork-mcp` TypeScript server used by the private source repo. If you swap in your own implementation, keep the tool names and semantics compatible with the contract documented in [`teamwork/SKILL.md`](./teamwork/SKILL.md).
 
 Generic host config guidance for a local MCP server:
 
@@ -117,6 +124,12 @@ Portable config shape:
 }
 ```
 
+Install the bundled server dependencies before wiring your host config:
+
+```bash
+cd teamwork-mcp && npm install
+```
+
 ## Security
 
 - This public repo includes `.env.template` files only. Do not commit real `.env` files.
@@ -132,4 +145,4 @@ The public subset was copied from the current `moorej2400/j-skills` `main` branc
 - `cobuild` was introduced in `88e3406`
 - top-level MCP setup docs were updated in `532c794` and `a1c0073`
 
-If you want the MCP server code itself public later, publish that as a separate repo with its own install and security docs instead of mixing it into this minimal skill subset.
+The bundled `teamwork-mcp` stays intentionally narrow: it exists to support the public `teamwork` skill without requiring a second private checkout.
