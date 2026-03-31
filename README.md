@@ -50,6 +50,33 @@ Before running either skill:
 - Update CLI names, model names, and output directories to match your machine.
 - Keep runtime artifacts out of git.
 
+## How To Add a Skill Stub
+
+If you are installing one of these skills into another system repo, use the same stub pattern as `j-skills`: create a folder with the exact same name as the source skill folder, then make its `SKILL.md` a thin redirect back to the canonical source in this repo.
+
+Required stub shape:
+
+```md
+---
+name: <skill-name>
+description: <copy the description from the source skill frontmatter>
+---
+
+Read the SKILL.md in full from '/path/to/j-skills-public/<skill-name>/SKILL.md'
+```
+
+Rules:
+
+- Keep the folder name exactly the same as this repo.
+- Copy the `name` and `description` fields exactly from the source skill frontmatter.
+- Treat this repo as the canonical source for the public subset.
+- Point the stub back to your local clone of `j-skills-public`, not to an edited duplicate.
+
+Canonical source paths:
+
+- `cobuild` -> `j-skills-public/cobuild/SKILL.md`
+- `teamwork` -> `j-skills-public/teamwork/SKILL.md`
+
 ## MCP Notes
 
 `cobuild` does not require MCP.
