@@ -28,24 +28,26 @@ Prefer a `SKILL_VARS` block in the task prompt. If `worker_pool` is omitted ther
 ```yaml
 SKILL_VARS:
   worker_pool:
-    - { cli: "codex", model: "gpt-5" }
-    - { cli: "copilot", model: "gpt-5" }
+    - { cli: "copilot", model: "claude-opus-4.6", reasoning_effort: "high" }
+    - { cli: "copilot", model: "gpt-5.4", reasoning_effort: "xhigh" }
   workers:
     - { alias: "frontend", specialty: "frontend" }
     - { alias: "backend", specialty: "backend" }
     - { alias: "api", specialty: "api" }
-  max_workers: 4
+  max_workers: 6
   output_dir: ".teamwork"
   poll_seconds: 30
 ```
 
 Rules:
 
-- `workers` is optional. If omitted, the parent derives `2-4` specialized workers from the task.
+- `workers` is optional. If omitted, the parent derives `2-6` specialized workers from the task.
 - If the user explicitly requests worker specialties or counts, honor that unless impossible.
 - `worker_pool` defines which provider/model combinations the parent may choose from.
+- Each `worker_pool` entry may also include `reasoning_effort` when the target host supports it.
 - Mixed providers are allowed, but only from the configured pool.
 - Normalize `cli` against `codex|claude|gemini|opencode|copilot`.
+- Normalize `reasoning_effort` against `minimal|low|medium|high|xhigh` when present.
 - Keep one stable child session per worker alias for the full run.
 
 ## Env Defaults
@@ -53,9 +55,10 @@ Rules:
 Read defaults from `teamwork/.env` and keep `teamwork/.env.template` in sync with it.
 
 - `TEAMWORK_WORKER_POOL`
-  Semicolon-separated provider/model pool in the form `cli:model;cli:model;...`
+  Semicolon-separated provider/model pool in the form `cli:model@reasoning_effort;cli:model@reasoning_effort;...`
+  Repeated entries are allowed and act as weighted defaults.
 - `TEAMWORK_MAX_WORKERS`
-  Default worker cap. Default `4`.
+  Default worker cap. Default `6`.
 - `TEAMWORK_OUTPUT_DIR`
   Default artifact root. Default `.teamwork`.
 - `TEAMWORK_POLL_SECONDS`
@@ -101,7 +104,7 @@ Detailed behavior:
 1. Load `teamwork/.env`, then apply `SKILL_VARS` overrides.
 2. Inspect the task and repo, then write `teamwork-task.md`.
 3. Decide whether the task needs one phase or multiple phases. Use phases only when they reduce drift or unlock testing.
-4. Choose up to `4` workers from the allowed provider pool.
+4. Choose up to `6` workers from the allowed provider pool.
 5. Start or reuse `teamwork-mcp`.
 6. Create one teamwork session with `tw_create_session`.
 7. Register the parent and every worker with `tw_register_agent`.
