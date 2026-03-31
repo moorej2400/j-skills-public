@@ -22,7 +22,7 @@ The skill supports optional env defaults in the skill folder:
 - `TEAMWORK_OUTPUT_DIR`
 - `TEAMWORK_POLL_SECONDS`
 
-`TEAMWORK_WORKER_POOL` supports repeated weighted entries and an optional `@reasoning_effort` suffix per entry, for example `copilot:claude-opus-4.6@high`.
+`TEAMWORK_WORKER_POOL` supports repeated weighted entries and an optional `@reasoning_effort` suffix per entry, for example `copilot:claude-opus-latest@high`.
 
 Prompt-provided values should override env defaults.
 

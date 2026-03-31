@@ -28,8 +28,8 @@ Prefer a `SKILL_VARS` block in the task prompt. If `worker_pool` is omitted ther
 ```yaml
 SKILL_VARS:
   worker_pool:
-    - { cli: "copilot", model: "claude-opus-4.6", reasoning_effort: "high" }
-    - { cli: "copilot", model: "gpt-5.4", reasoning_effort: "xhigh" }
+    - { cli: "copilot", model: "claude-opus-latest", reasoning_effort: "high" }
+    - { cli: "copilot", model: "gpt-latest", reasoning_effort: "xhigh" }
   workers:
     - { alias: "frontend", specialty: "frontend" }
     - { alias: "backend", specialty: "backend" }
