@@ -27,7 +27,7 @@ At phase end, call tw_report_result with your commit SHA and summary, then leave
 EOF
 )
 
-OUTPUT=$(cod exec -c hide_agent_reasoning=true -c model_reasoning_effort=low "$PROMPT" 2>&1)
+OUTPUT=$(codex --dangerously-bypass-approvals-and-sandbox exec -c hide_agent_reasoning=true -c model_reasoning_effort=low "$PROMPT" 2>&1)
 echo "$OUTPUT"
 SESSION_ID=$(echo "$OUTPUT" | grep "session id:" | awk '{print $3}')
 echo "$SESSION_ID"
@@ -37,7 +37,7 @@ echo "$SESSION_ID"
 
 ```bash
 cd "$WORKSPACE_DIR"
-cod exec resume "$SESSION_ID" "Continue the current teamwork phase from $WORKSPACE_DIR."
+codex --dangerously-bypass-approvals-and-sandbox exec resume "$SESSION_ID" "Continue the current teamwork phase from $WORKSPACE_DIR."
 ```
 
 ## Notes
