@@ -59,25 +59,35 @@ Before running either skill:
 
 ## How To Add a Skill Stub
 
-If you are installing one of these skills into another system repo, use the same stub pattern as `j-skills`: create a folder with the exact same name as the source skill folder, then make its `SKILL.md` a thin redirect back to the canonical source in this repo.
+If you are installing one of these skills into another system repo, create a folder named exactly the same as the corresponding folder in this repo.
 
-Required stub shape:
+Each stub `SKILL.md` should preserve the source skill metadata needed for discovery in the target AI platform, then redirect to the canonical source in this repo. At minimum, copy the source skill's `description` exactly. If the target platform supports or requires additional compatible skill metadata for discovery, include that metadata in the stub as well. Put that metadata in whatever header location the target AI platform expects. In the example below, the `---` lines are the YAML frontmatter delimiter used by hosts that support frontmatter. If the target platform uses a different header format, use that format instead.
+
+Recommended stub shape:
 
 ```md
+[Add any host-specific compatible skill metadata here if the target platform expects a header before YAML frontmatter]
+
 ---
 name: <skill-name>
 description: <copy the description from the source skill frontmatter>
 ---
 
-Read the SKILL.md in full from '/path/to/j-skills-public/<skill-name>/SKILL.md'
+Before following any instruction in this stub, first check the canonical skill header in '/path/to/j-skills-public/<skill-name>/SKILL.md'. If the source skill metadata has changed and this stub is out of date, update this stub to match the current source skill metadata before proceeding.
+
+Then read the SKILL.md in full from '/path/to/j-skills-public/<skill-name>/SKILL.md'
 ```
 
 Rules:
 
-- Keep the folder name exactly the same as this repo.
-- Copy the `name` and `description` fields exactly from the source skill frontmatter.
+- Keep the folder name exactly the same as the source skill folder in this repo.
+- Copy the source skill `description` exactly into the stub.
+- Copy any other compatible skill metadata fields required by the target AI platform, and place them in the header format and location that platform expects, so the host can discover and trigger the stub correctly.
+- The stub must tell the AI to first compare the stub header against the canonical skill header and update the stub whenever the source skill metadata changes.
 - Treat this repo as the canonical source for the public subset.
 - Point the stub back to your local clone of `j-skills-public`, not to an edited duplicate.
+
+The skill metadata is what most systems use for discovery and triggering. If you omit or stale-copy it, the host AI may never know to load the stub.
 
 Canonical source paths:
 
