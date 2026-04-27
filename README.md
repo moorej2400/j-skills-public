@@ -1,8 +1,9 @@
 # j-skills-public
 
-Public subset of my `j-skills` monorepo, limited to the two collaboration skills that are reasonably reusable outside my private setup:
+Public subset of my `j-skills` monorepo, limited to skills that are reasonably reusable outside my private setup:
 
 - `cobuild`
+- `frontend-dev-vercel`
 - `teamwork`
 
 This repo was created from a fresh snapshot of the private source repo rather than by preserving its history. That keeps the public history clean and avoids accidentally publishing unrelated internal work.
@@ -12,6 +13,12 @@ This repo was created from a fresh snapshot of the private source repo rather th
 ### `cobuild`
 
 Run multiple coding-agent CLIs against the same implementation task in isolated git worktrees, compare the results, do one critique-and-rebuild pass, and only apply a final direction after unanimous approval from the child sessions.
+
+MCP requirement: none.
+
+### `frontend-dev-vercel`
+
+Design, implement, review, or audit frontend interfaces against a practical checklist based on Vercel's Web Interface Guidelines.
 
 MCP requirement: none.
 
@@ -31,6 +38,8 @@ j-skills-public/
     .env.template
     *-Cobuild.md
     ALTERNATIVE_DESIGNS.md
+  frontend-dev-vercel/
+    SKILL.md
   teamwork/
     SKILL.md
     README.md
@@ -92,6 +101,7 @@ The skill metadata is what most systems use for discovery and triggering. If you
 Canonical source paths:
 
 - `cobuild` -> `j-skills-public/cobuild/SKILL.md`
+- `frontend-dev-vercel` -> `j-skills-public/frontend-dev-vercel/SKILL.md`
 - `teamwork` -> `j-skills-public/teamwork/SKILL.md`
 
 ## MCP Notes
@@ -149,10 +159,12 @@ cd teamwork-mcp && npm install
 
 ## Source Review
 
-The public subset was copied from the current `moorej2400/j-skills` `main` branch after pulling the latest version and checking the recent history for the relevant paths:
+The original collaboration skills were copied from the current `moorej2400/j-skills` `main` branch after pulling the latest version and checking the recent history for the relevant paths:
 
 - `teamwork` was introduced in `69dddde` and materially updated in `a1c0073`
 - `cobuild` was introduced in `88e3406`
 - top-level MCP setup docs were updated in `532c794` and `a1c0073`
+
+`frontend-dev-vercel` was added directly to this public repo and credits Vercel's Web Interface Guidelines in its skill body.
 
 The bundled `teamwork-mcp` stays intentionally narrow: it exists to support the public `teamwork` skill without requiring a second private checkout.
