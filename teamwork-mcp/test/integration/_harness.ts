@@ -2,7 +2,7 @@ import { spawn, ChildProcess, execFileSync } from "node:child_process";
 import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,12 +47,25 @@ export async function postMcp(
 }
 
 export async function callTool(sid: string, name: string, args: Record<string, any> = {}, id = 10): Promise<any> {
+  const toolName = name === "teamwork" ? name : "teamwork";
+  const toolArgs = name === "teamwork" ? args : { tool_name: name, options: args };
   const res = await postMcp(
-    { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
+    { jsonrpc: "2.0", id, method: "tools/call", params: { name: toolName, arguments: toolArgs } },
     sid
   );
   if (res.json?.error) throw new Error(`Tool ${name} failed: ${JSON.stringify(res.json.error)}`);
-  return JSON.parse(res.json.result.content[0].text);
+  const text = res.json.result.content[0].text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(text);
+  }
+}
+
+export async function listTools(sid: string): Promise<any[]> {
+  const res = await postMcp({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, sid);
+  if (res.json?.error) throw new Error(`tools/list failed: ${JSON.stringify(res.json.error)}`);
+  return res.json.result.tools;
 }
 
 export async function initSession(clientName = "test-client"): Promise<string> {
@@ -93,7 +106,7 @@ async function allocatePort() {
   });
 }
 
-export async function startServer(): Promise<{
+export async function startServer(extraEnv: Record<string, string> = {}): Promise<{
   server: ChildProcess;
   tmpDir: string;
   waitReady: () => Promise<void>;
@@ -107,6 +120,8 @@ export async function startServer(): Promise<{
       TEAMWORK_UI_PORT: String(TEST_PORT),
       TEAMWORK_TRANSPORT: "http",
       TEAMWORK_DATA_DIR: tmpDir,
+      TEAMWORK_OPEN_BROWSER: "0",
+      ...extraEnv,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -124,6 +139,52 @@ export async function startServer(): Promise<{
   });
 
   return { server, tmpDir, waitReady };
+}
+
+export function createFakeCliFixture() {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "teamwork-fake-cli-"));
+  const cliPath = path.join(rootDir, "fake-worker-cli.cjs");
+  writeFileSync(
+    cliPath,
+    `#!/usr/bin/env node
+process.stdout.write("fake-session-id:" + (process.env.TEAMWORK_AGENT_ALIAS || "unknown") + "\\n");
+process.stdout.write("fake-start:" + process.argv.slice(2).join(" ") + "\\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  process.stdout.write("fake-input:" + chunk.replace(/\\n/g, "\\\\n") + "\\n");
+});
+setInterval(() => {}, 1000);
+`,
+    "utf8"
+  );
+  chmodSync(cliPath, 0o755);
+  return {
+    rootDir,
+    cliPath,
+    cleanup() {
+      rmSync(rootDir, { recursive: true, force: true });
+    },
+  };
+}
+
+export function createNamedCliFixture(name: string, script: string) {
+  const rootDir = mkdtempSync(path.join(tmpdir(), `teamwork-${name}-cli-`));
+  const cliPath = path.join(rootDir, name);
+  writeFileSync(cliPath, script, "utf8");
+  chmodSync(cliPath, 0o755);
+  if (process.platform === "win32") {
+    const cmdPath = path.join(rootDir, `${name}.cmd`);
+    writeFileSync(cmdPath, `@echo off\r\n"${process.execPath}" "%~dp0${name}" %*\r\n`, "utf8");
+    chmodSync(cmdPath, 0o755);
+  }
+  return {
+    rootDir,
+    cliPath,
+    pathEnv: `${rootDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    cleanup() {
+      rmSync(rootDir, { recursive: true, force: true });
+    },
+  };
 }
 
 export function stopServer(server: ChildProcess, tmpDir: string) {

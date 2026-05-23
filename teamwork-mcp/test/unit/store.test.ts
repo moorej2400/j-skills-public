@@ -19,6 +19,14 @@ function createStore() {
   };
 }
 
+function claimWorkItem(store: TeamworkStore, sessionId: string, worker: { token: string }, workItemId: string) {
+  store.claimWorkItem({
+    sessionId,
+    actorToken: worker.token,
+    workItemId,
+  });
+}
+
 test("creates a session, registers agents, and tracks the active phase", () => {
   const { store, cleanup } = createStore();
 
@@ -41,6 +49,7 @@ test("creates a session, registers agents, and tracks the active phase", () => {
       sessionId: session.sessionId,
       alias: "frontend",
       specialty: "frontend",
+      responsibility: "Own account settings UI and ask backend for endpoint contracts.",
       cli: "codex",
       model: "gpt-5",
       role: "worker",
@@ -65,6 +74,14 @@ test("creates a session, registers agents, and tracks the active phase", () => {
     const summary = store.getSessionSummary(session.sessionId);
     assert.equal(summary.currentPhase?.phaseNumber, 1);
     assert.equal(summary.agents.length, 3);
+    assert.equal(
+      summary.agents.find((agent: { alias: string }) => agent.alias === "frontend")?.responsibility,
+      "Own account settings UI and ask backend for endpoint contracts."
+    );
+    assert.equal(
+      store.listAgents(session.sessionId).agents.find((agent: { alias: string }) => agent.alias === "frontend")?.responsibility,
+      "Own account settings UI and ask backend for endpoint contracts."
+    );
     assert.deepEqual(
       summary.agents.map((agent: { alias: string }) => agent.alias),
       ["parent", "frontend", "backend"]
@@ -291,7 +308,7 @@ test("acknowledges messages, updates agent status, and completes the session", (
     const summary = store.getSessionSummary(session.sessionId);
 
     assert.equal(backendState.lastAckSequence, sent.sequence);
-    assert.equal(backendState.status, "blocked");
+    assert.equal(backendState.status, "inactive");
     assert.equal(summary.status, "completed");
   } finally {
     cleanup();
@@ -380,6 +397,34 @@ test("registers and updates runtimes with exit tracking", () => {
     assert.ok(rt.runtimeId);
     assert.equal(rt.status, "running");
 
+    store.setAgentStatus({
+      sessionId: session.sessionId,
+      actorToken: worker.token,
+      status: "idle",
+      note: "Current slice complete; staying available for questions.",
+    });
+    const workerState = store.getAgentState(worker.agentId);
+    assert.equal(workerState.status, "idle");
+
+    store.sendMessage({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      target: "agent",
+      targetAgentId: worker.agentId,
+      kind: "question",
+      body: "Can you confirm the API payload shape?",
+    });
+    const inbox = store.listMessagesSince({
+      sessionId: session.sessionId,
+      actorToken: worker.token,
+      afterSequence: 0,
+    });
+    assert.equal(inbox.messages.length, 1);
+    assert.equal(inbox.messages[0]?.body, "Can you confirm the API payload shape?");
+
+    const running = store.getRuntime(rt.runtimeId);
+    assert.equal(running.status, "running");
+
     store.updateRuntime({
       sessionId: session.sessionId,
       actorToken: parent.token,
@@ -399,6 +444,207 @@ test("registers and updates runtimes with exit tracking", () => {
   }
 });
 
+test("completeSession requires worker runtimes to be torn down first", () => {
+  const { store, cleanup, session, parent, worker } = setupSessionWithWorker();
+  try {
+    const rt = store.registerRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: worker.agentId,
+      pid: 34567,
+      transport: "stdio",
+    });
+
+    store.recordIntegrationEvent({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      kind: "merge",
+      commitSha: "abc123",
+    });
+    store.beginIntegration({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+    });
+    store.completePhase({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      summary: "Empty phase complete.",
+    });
+
+    assert.throws(
+      () =>
+        store.completeSession({
+          sessionId: session.sessionId,
+          actorToken: parent.token,
+          summary: "Tried to close the session too early.",
+        }),
+      /worker runtimes are still running/
+    );
+
+    store.updateRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      runtimeId: rt.runtimeId,
+      status: "exited",
+      exitCode: 0,
+    });
+    store.completeSession({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      summary: "Worker runtime torn down before session completion.",
+    });
+
+    const summary = store.getSessionSummary(session.sessionId);
+    assert.equal(summary.status, "completed");
+  } finally {
+    cleanup();
+  }
+});
+
+test("getAuditReport summarizes per-agent traffic, runtime, and paired-worker DM metrics", () => {
+  const { store, cleanup } = createStore();
+  try {
+    const session = store.createSession({
+      parentAlias: "parent",
+      title: "Audit session",
+      taskSlug: "audit-session",
+      projectRoot: "/repo",
+    });
+    const parent = store.registerAgent({
+      sessionId: session.sessionId,
+      alias: "parent",
+      specialty: "orchestrator",
+      cli: "codex",
+      model: "gpt-5",
+      role: "parent",
+    });
+    const pairA = store.registerAgent({
+      sessionId: session.sessionId,
+      alias: "backend-a",
+      specialty: "backend",
+      cli: "codex",
+      model: "gpt-5",
+      role: "worker",
+    });
+    const pairB = store.registerAgent({
+      sessionId: session.sessionId,
+      alias: "backend-b",
+      specialty: "backend",
+      cli: "copilot",
+      model: "gpt-5",
+      role: "worker",
+    });
+
+    store.startPhase({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Phase 1",
+      goal: "Validate paired-worker audit metrics.",
+    });
+    store.registerRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: pairA.agentId,
+      pid: 11111,
+      transport: "codex-cli",
+    });
+    const runtimeB = store.registerRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: pairB.agentId,
+      pid: 22222,
+      transport: "copilot-cli",
+    });
+    store.sendMessage({
+      sessionId: session.sessionId,
+      actorToken: pairA.token,
+      target: "agent",
+      targetAgentId: pairB.agentId,
+      kind: "question",
+      body: "Did you finish the repository method?",
+    });
+    store.sendMessage({
+      sessionId: session.sessionId,
+      actorToken: pairB.token,
+      target: "agent",
+      targetAgentId: pairA.agentId,
+      kind: "answer",
+      body: "Yes, I pushed the implementation.",
+    });
+    store.setAgentStatus({
+      sessionId: session.sessionId,
+      actorToken: pairA.token,
+      status: "blocked",
+      note: "Waiting on schema review.",
+    });
+    store.setAgentStatus({
+      sessionId: session.sessionId,
+      actorToken: pairA.token,
+      status: "idle",
+      note: "Slice complete; staying available.",
+    });
+    const workItem = store.upsertWorkItem({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Ship backend slice",
+      description: "Implement and verify the backend pair slice.",
+      ownerAgentId: pairB.agentId,
+      status: "assigned",
+    });
+    claimWorkItem(store, session.sessionId, pairB, workItem.workItemId);
+    store.recordResult({
+      sessionId: session.sessionId,
+      actorToken: pairB.token,
+      workItemId: workItem.workItemId,
+      resultType: "commit",
+      summary: "Backend slice committed.",
+      data: JSON.stringify({ sha: "abc123" }),
+    });
+    store.updateRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      runtimeId: runtimeB.runtimeId,
+      status: "exited",
+      exitCode: 0,
+    });
+
+    const report = store.getAuditReport(session.sessionId);
+
+    assert.equal(report.rollup.workerCount, 2);
+    assert.equal(report.rollup.messageCount, 2);
+    assert.equal(report.rollup.directMessageCount, 2);
+    assert.equal(report.rollup.resultCount, 1);
+    assert.equal(report.rollup.blockedStatusEventCount, 1);
+    assert.equal(report.rollup.pairSpecialtyCount, 1);
+    assert.equal(report.rollup.pairTrafficSpecialtyCount, 1);
+
+    const backendA = report.agents.find((agent: any) => agent.alias === "backend-a");
+    const backendB = report.agents.find((agent: any) => agent.alias === "backend-b");
+    assert.ok(backendA);
+    assert.ok(backendB);
+    assert.equal(backendA.messagesSentCount, 1);
+    assert.equal(backendA.messagesReceivedCount, 1);
+    assert.equal(backendA.blockedCount, 1);
+    assert.equal(backendA.idleCount, 1);
+    assert.equal(backendA.activeRuntimeCount, 1);
+    assert.equal(backendB.answersSentCount, 1);
+    assert.equal(backendB.responsesSentCount, 1);
+    assert.equal(backendB.exitedRuntimeCount, 1);
+
+    assert.equal(report.pairs.length, 1);
+    assert.equal(report.pairs[0]?.specialty, "backend");
+    assert.equal(report.pairs[0]?.directMessageCount, 2);
+    assert.equal(report.pairs[0]?.hasPairTraffic, true);
+  } finally {
+    cleanup();
+  }
+});
+
 test("records and lists results for work items", () => {
   const { store, cleanup, session, parent, worker } = setupSessionWithWorker();
   try {
@@ -409,9 +655,10 @@ test("records and lists results for work items", () => {
       title: "Implement API",
       description: "Build the REST endpoint.",
       ownerAgentId: worker.agentId,
-      status: "in-progress",
+      status: "assigned",
     });
 
+    claimWorkItem(store, session.sessionId, worker, wi.workItemId);
     const result = store.recordResult({
       sessionId: session.sessionId,
       actorToken: worker.token,

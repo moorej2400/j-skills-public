@@ -5,40 +5,14 @@ import { ChildProcess } from "node:child_process";
 import {
   TEST_PORT,
   BASE_URL,
+  callTool,
   postMcp,
   initSession,
   startServer,
   stopServer,
 } from "./_harness.js";
 
-const EXPECTED_TOOLS = [
-  "tw_get_dashboard_url",
-  "tw_create_session",
-  "tw_register_agent",
-  "tw_get_session_state",
-  "tw_start_phase",
-  "tw_complete_phase",
-  "tw_upsert_work_item",
-  "tw_list_work_items",
-  "tw_send_message",
-  "tw_list_messages",
-  "tw_ack_messages",
-  "tw_set_agent_status",
-  "tw_register_worktree",
-  "tw_update_worktree",
-  "tw_list_worktrees",
-  "tw_register_runtime",
-  "tw_update_runtime",
-  "tw_list_runtimes",
-  "tw_record_result",
-  "tw_list_results",
-  "tw_record_integration_event",
-  "tw_list_integration_events",
-  "tw_create_checkpoint",
-  "tw_list_checkpoints",
-  "tw_inspect_worktree",
-  "tw_complete_session",
-];
+const EXPECTED_TOOLS = ["teamwork"];
 
 describe("teamwork-mcp HTTP transport", () => {
   let server: ChildProcess;
@@ -53,7 +27,7 @@ describe("teamwork-mcp HTTP transport", () => {
 
   after(() => stopServer(server, tmpDir));
 
-  it(`initializes an MCP session and lists all ${EXPECTED_TOOLS.length} tools`, async () => {
+  it("initializes an MCP session and lists the single teamwork dispatcher tool", async () => {
     const sid = await initSession("transport-test");
 
     const tools = await postMcp(
@@ -63,10 +37,8 @@ describe("teamwork-mcp HTTP transport", () => {
     assert.equal(tools.status, 200);
     const toolNames: string[] = tools.json.result.tools.map((t: any) => t.name);
 
-    assert.equal(toolNames.length, EXPECTED_TOOLS.length, `expected ${EXPECTED_TOOLS.length} tools, got ${toolNames.length}`);
-    for (const name of EXPECTED_TOOLS) {
-      assert.ok(toolNames.includes(name), `missing tool: ${name}`);
-    }
+    assert.deepEqual(toolNames, EXPECTED_TOOLS);
+    assert.match(tools.json.result.tools[0].description, /tool_name/);
   });
 
   it("two clients receive distinct MCP session IDs", async () => {
@@ -91,6 +63,35 @@ describe("teamwork-mcp HTTP transport", () => {
     assert.ok(ct.includes("application/json"), `expected application/json, got ${ct}`);
     const body = await res.json();
     assert.ok(Array.isArray(body.sessions));
+  });
+
+  it("serves a session audit report at /api/sessions/:id/audit", async () => {
+    const sid = await initSession("audit-http-test");
+    const session = await callTool(sid, "tw_create_session", {
+      parentAlias: "parent",
+      title: "HTTP audit session",
+      taskSlug: "http-audit",
+      projectRoot: "/repo",
+      taskPrompt: "Test task prompt for http transport.",
+    }, 30);
+    const sessionId = session.sessionId;
+
+    const res = await fetch(`${BASE_URL}/api/sessions/${sessionId}/audit`);
+    assert.equal(res.status, 200);
+    const ct = res.headers.get("content-type") ?? "";
+    assert.ok(ct.includes("application/json"), `expected application/json, got ${ct}`);
+    const body = await res.json();
+    assert.equal(body.session.sessionId, sessionId);
+    assert.equal(body.rollup.workerCount, 0);
+  });
+
+  it("serves debug events at /api/debug-events", async () => {
+    const res = await fetch(`${BASE_URL}/api/debug-events?limit=10`);
+    assert.equal(res.status, 200);
+    const ct = res.headers.get("content-type") ?? "";
+    assert.ok(ct.includes("application/json"), `expected application/json, got ${ct}`);
+    const body = await res.json();
+    assert.ok(Array.isArray(body.events));
   });
 
   it("DELETE terminates an MCP session", async () => {

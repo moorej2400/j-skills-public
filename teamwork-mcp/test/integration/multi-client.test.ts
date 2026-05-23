@@ -38,6 +38,7 @@ describe("teamwork-mcp multi-client", () => {
       title: "Multi-client test",
       taskSlug: "multi-client",
       projectRoot: "/tmp/multi",
+      taskPrompt: "Test task prompt for multi-client state visibility.",
     }, 20);
     assert.ok(created.sessionId, "should return sessionId");
 
@@ -54,6 +55,7 @@ describe("teamwork-mcp multi-client", () => {
       title: "Agent registration test",
       taskSlug: "agent-reg",
       projectRoot: "/tmp/reg",
+      taskPrompt: "Test task prompt for multi-client agent registration.",
     }, 30);
 
     const parent = await callTool(sidA, "tw_register_agent", {
@@ -90,6 +92,7 @@ describe("teamwork-mcp multi-client", () => {
       title: "Phase visibility test",
       taskSlug: "phase-vis",
       projectRoot: "/tmp/vis",
+      taskPrompt: "Test task prompt for multi-client phase visibility.",
     }, 40);
 
     const parent = await callTool(sidA, "tw_register_agent", {
@@ -123,6 +126,7 @@ describe("teamwork-mcp multi-client", () => {
       title: "Messaging test",
       taskSlug: "msg-test",
       projectRoot: "/tmp/msg",
+      taskPrompt: "Test task prompt for multi-client messaging.",
     }, 50);
 
     const parent = await callTool(sidA, "tw_register_agent", {
@@ -169,6 +173,7 @@ describe("teamwork-mcp multi-client", () => {
       title: "Runtime visibility test",
       taskSlug: "runtime-vis",
       projectRoot: fixture.repoRoot,
+      taskPrompt: "Test task prompt for multi-client runtime visibility.",
     }, 60);
 
     const parent = await callTool(sidA, "tw_register_agent", {
@@ -224,21 +229,25 @@ describe("teamwork-mcp multi-client", () => {
     assert.equal(worktreeState.branch, "worker-a");
     assert.equal(worktreeState.dirty, true);
 
+    const workItem = await callTool(sidA, "tw_upsert_work_item", {
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Implement runtime wiring",
+      description: "Wire the runtime helpers into the server flow.",
+      ownerAgentId: worker.agentId,
+      status: "assigned",
+    }, 67);
+    await callTool(sidB, "tw_claim_work_item", {
+      sessionId: session.sessionId,
+      actorToken: worker.token,
+      workItemId: workItem.workItemId,
+    }, 671);
+
     const result = await callTool(sidB, "tw_record_result", {
       sessionId: session.sessionId,
       actorToken: worker.token,
-      workItemId: await (async () => {
-        const item = await callTool(sidA, "tw_upsert_work_item", {
-          sessionId: session.sessionId,
-          actorToken: parent.token,
-          phaseNumber: 1,
-          title: "Implement runtime wiring",
-          description: "Wire the runtime helpers into the server flow.",
-          ownerAgentId: worker.agentId,
-          status: "assigned",
-        }, 67);
-        return item.workItemId;
-      })(),
+      workItemId: workItem.workItemId,
       resultType: "note",
       summary: "Worker recorded runtime wiring progress.",
       data: "ready for parent review",

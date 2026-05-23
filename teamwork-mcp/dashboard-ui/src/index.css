@@ -1,0 +1,136 @@
+@import "@fontsource/geist-sans/400.css";
+@import "@fontsource/geist-sans/500.css";
+@import "@fontsource/geist-sans/600.css";
+@import "@fontsource/geist-sans/700.css";
+@import "@fontsource/geist-mono/400.css";
+@import "@fontsource/geist-mono/500.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * THEME — Teamwork dark dev-tool palette
+ *
+ * Cool 220-hue background, warm off-white foreground, desaturated emerald
+ * primary (deliberately swapped from the AI-default violet) paired with a
+ * cyan `accent-2` so direct vs broadcast (and chart series) can mean
+ * something. Three depth tokens (background < card < card-elevated/popover),
+ * a `border-subtle/strong` pair, and a `--status-*` triad reused by the 3D
+ * viz, agent cards, lifecycle bar, assignments board and dot indicators.
+ * Keep `:root` and `.dark` blocks in sync — the app sets `<html class="dark">`
+ * (see index.html).
+ */
+
+@layer base {
+  :root {
+    --background: 222 13% 6%;
+    --foreground: 220 15% 92%;
+    --card: 220 12% 8%;
+    --card-foreground: 220 15% 92%;
+    --card-elevated: 220 11% 10%;
+    --popover: 220 10% 11%;
+    --popover-foreground: 220 15% 94%;
+    --primary: 158 65% 48%;
+    --primary-foreground: 220 15% 98%;
+    --secondary: 220 10% 14%;
+    --secondary-foreground: 220 15% 92%;
+    --muted: 220 10% 13%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 158 50% 14%;
+    --accent-foreground: 220 15% 96%;
+    --accent-2: 190 80% 55%;
+    --accent-2-foreground: 220 20% 98%;
+    --destructive: 0 78% 60%;
+    --destructive-foreground: 220 15% 98%;
+    --border: 220 8% 16%;
+    --border-subtle: 220 8% 12%;
+    --border-strong: 220 8% 22%;
+    --input: 220 10% 14%;
+    --ring: 158 65% 48%;
+    --radius: 0.65rem;
+
+    /* Semantic status tokens — consumed by AgentCard, LifecycleSummary,
+       AssignmentsBoard, AgentDots, MetricsBar, and the 3D viz `colorForStatus`.
+       Kept here so a single edit re-themes the entire status surface. */
+    --status-busy: 142 70% 55%;
+    --status-busy-foreground: 145 50% 12%;
+    --status-idle: 220 10% 55%;
+    --status-stopped: 0 70% 60%;
+    --status-blocked: 38 92% 60%;
+    --status-warning: 38 92% 60%;
+    --status-info: 190 80% 55%;
+    --status-success: 142 70% 55%;
+  }
+
+  .dark {
+    --background: 222 13% 6%;
+    --foreground: 220 15% 92%;
+    --card: 220 12% 8%;
+    --card-foreground: 220 15% 92%;
+    --card-elevated: 220 11% 10%;
+    --popover: 220 10% 11%;
+    --popover-foreground: 220 15% 94%;
+    --primary: 158 65% 48%;
+    --primary-foreground: 220 15% 98%;
+    --secondary: 220 10% 14%;
+    --secondary-foreground: 220 15% 92%;
+    --muted: 220 10% 13%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 158 50% 14%;
+    --accent-foreground: 220 15% 96%;
+    --accent-2: 190 80% 55%;
+    --accent-2-foreground: 220 20% 98%;
+    --destructive: 0 78% 60%;
+    --destructive-foreground: 220 15% 98%;
+    --border: 220 8% 16%;
+    --border-subtle: 220 8% 12%;
+    --border-strong: 220 8% 22%;
+    --input: 220 10% 14%;
+    --ring: 158 65% 48%;
+
+    --status-busy: 142 70% 55%;
+    --status-busy-foreground: 145 50% 12%;
+    --status-idle: 220 10% 55%;
+    --status-stopped: 0 70% 60%;
+    --status-blocked: 38 92% 60%;
+    --status-warning: 38 92% 60%;
+    --status-info: 190 80% 55%;
+    --status-success: 142 70% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased tracking-tight;
+    /* Geist stylistic features: tabular numerals on by default; `rlig` + `calt`
+       keep ligatures + contextual alternates working. */
+    font-feature-settings: "rlig" 1, "calt" 1, "tnum" 1;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply tracking-tighter;
+  }
+  code,
+  pre,
+  kbd {
+    @apply font-mono;
+  }
+}
+
+/* MetricsBar shimmer — horizontal sweep across an active tile when there's
+   recent traffic. Slow + low-opacity so it reads as ambient rather than busy. */
+@keyframes metric-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.shimmer-sweep {
+  animation: metric-shimmer 3.6s ease-in-out infinite;
+}

@@ -4,13 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run dashboard:build && tsc -p tsconfig.json",
+    "dashboard:install": "cd dashboard-ui && npm install",
+    "dashboard:build": "cd dashboard-ui && npm install && npm run build",
+    "dashboard:dev": "cd dashboard-ui && npm run dev",
     "test": "node --import tsx --test test/**/*.test.ts",
+    "mcp:bootstrap": "node --import tsx src/stdio-bootstrap.ts",
     "start": "node --import tsx src/server.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",
     "better-sqlite3": "^12.2.0",
+    "node-pty": "^1.1.0",
     "zod": "^4.1.5"
   },
   "devDependencies": {
