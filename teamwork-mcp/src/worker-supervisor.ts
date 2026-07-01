@@ -101,6 +101,45 @@ export class WorkerSupervisor {
     return out;
   }
 
+  private handleManagedSpawnError(input: {
+    sessionId: string;
+    actorToken?: string;
+    runtimeId: string;
+    agentId: string;
+    message: string;
+    captureHandoff?: boolean;
+    clearWorker?: boolean;
+  }) {
+    if (input.actorToken) {
+      this.store.updateRuntime({
+        sessionId: input.sessionId,
+        actorToken: input.actorToken,
+        runtimeId: input.runtimeId,
+        status: "crashed",
+      });
+    }
+    this.recordRuntimeLog({
+      sessionId: input.sessionId,
+      runtimeId: input.runtimeId,
+      agentId: input.agentId,
+      stream: "system",
+      text: input.message,
+    });
+    if (input.captureHandoff ?? true) {
+      this.store.captureRuntimeHandoffCandidate({
+        sessionId: input.sessionId,
+        runtimeId: input.runtimeId,
+        agentId: input.agentId,
+      });
+    }
+    if (input.clearWorker) {
+      this.workers.delete(input.runtimeId);
+      return;
+    }
+    const managed = this.workers.get(input.runtimeId);
+    if (managed) managed.child = undefined;
+  }
+
   launchWorker(input: {
     sessionId: string;
     actorToken: string;
@@ -187,6 +226,13 @@ export class WorkerSupervisor {
       workItems,
       currentClaim,
     });
+    const otelFilePath = agent.cli === "copilot"
+      ? this.copilotOtelFilePath({
+          sessionWorkspacePath: session.sessionWorkspacePath,
+          cwd: worktree.path,
+          agentAlias: agent.alias,
+        })
+      : undefined;
     const launch = this.adapterLaunch({
       cli: agent.cli,
       model: input.model ?? agent.model,
@@ -196,6 +242,7 @@ export class WorkerSupervisor {
       cwd: worktree.path,
       sessionWorkspacePath: session.sessionWorkspacePath,
       resumeSessionId: input.resumeSessionId,
+      otelFilePath,
     });
     const runtime = this.store.registerRuntime({
       sessionId: input.sessionId,
@@ -210,6 +257,7 @@ export class WorkerSupervisor {
       managedByServer: true,
       stdinWritable: mode === "pty" || (launch.stdin === "pipe" && capabilities.supportsPersistentStdin),
       resumeSupported: mode === "pty" ? false : capabilities.supportsResume,
+      otelFilePath,
       heartbeatIntervalSeconds: 30,
     });
 
@@ -311,6 +359,7 @@ export class WorkerSupervisor {
           pid: child.pid,
         });
       }
+      let spawnFailed = false;
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         this.captureRuntimeMetadata({ cli: agent.cli, sessionId: input.sessionId, runtimeId: runtime.runtimeId, stream: "stdout", text });
@@ -333,12 +382,34 @@ export class WorkerSupervisor {
           text: this.redactRuntimeOutput(text),
         });
       });
+      // Spawn ENOENT arrives on the child "error" event, not via the surrounding try/catch.
+      // Handle it here so one missing CLI cannot crash the singleton and orphan every MCP session.
+      child.on("error", (error) => {
+        if (spawnFailed) return;
+        spawnFailed = true;
+        this.handleManagedSpawnError({
+          sessionId: input.sessionId,
+          actorToken: input.actorToken,
+          runtimeId: runtime.runtimeId,
+          agentId: input.agentId,
+          message: `process failed to start: ${error.message}`,
+          clearWorker: true,
+        });
+      });
       child.on("exit", (code) => {
+        if (spawnFailed) return;
         const current = this.workers.get(runtime.runtimeId);
         if (!current) return;
         // Resumable CLIs can exit between turns while the logical worker session stays available.
         if (current.launchMode === "resume-command" && code === 0) {
           current.child = undefined;
+          this.store.updateRuntime({
+            sessionId: input.sessionId,
+            actorToken: input.actorToken,
+            runtimeId: runtime.runtimeId,
+            status: "exited",
+            exitCode: 0,
+          });
           this.recordRuntimeLog({
             sessionId: input.sessionId,
             runtimeId: runtime.runtimeId,
@@ -397,10 +468,11 @@ export class WorkerSupervisor {
     if (!plan.readyToLaunch) {
       throw new Error(`Launch plan is not ready: ${plan.blockingIssues.join("; ")}`);
     }
-    return {
-      launchPlanId: plan.launchPlanId,
-      runtimes: plan.workers.map((entry) => {
-        return this.launchWorker({
+    const launchErrors: Array<{ agentId: string; agentAlias: string; message: string }> = [];
+    const runtimes = [];
+    for (const entry of plan.workers) {
+      try {
+        runtimes.push(this.launchWorker({
           sessionId: input.sessionId,
           actorToken: input.actorToken,
           agentId: entry.agentId,
@@ -411,8 +483,19 @@ export class WorkerSupervisor {
           launchMode: input.launchMode,
           model: entry.model,
           reasoningEffort: entry.reasoningEffort,
+        }));
+      } catch (error) {
+        launchErrors.push({
+          agentId: entry.agentId,
+          agentAlias: entry.alias,
+          message: error instanceof Error ? error.message : String(error),
         });
-      }),
+      }
+    }
+    return {
+      launchPlanId: plan.launchPlanId,
+      runtimes,
+      launchErrors,
     };
   }
 
@@ -474,6 +557,7 @@ export class WorkerSupervisor {
         input: input.input,
         cwd: runtime.cwd,
         sessionWorkspacePath: this.store.getSessionSummary(input.sessionId).sessionWorkspacePath,
+        otelFilePath: runtime.otelFilePath,
       });
       this.recordRuntimeLog({
         sessionId: input.sessionId,
@@ -489,6 +573,7 @@ export class WorkerSupervisor {
         windowsHide: true,
       });
       if (managed) managed.child = child;
+      let spawnFailed = false;
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString();
         this.captureRuntimeMetadata({
@@ -523,7 +608,20 @@ export class WorkerSupervisor {
           text,
         });
       });
+      child.on("error", (error) => {
+        if (spawnFailed) return;
+        spawnFailed = true;
+        this.handleManagedSpawnError({
+          sessionId: input.sessionId,
+          actorToken: managed?.actorToken ?? input.actorToken ?? "",
+          runtimeId: input.runtimeId,
+          agentId: runtime.agentId,
+          message: `resume command failed to start: ${error.message}`,
+          clearWorker: false,
+        });
+      });
       child.on("exit", (code) => {
+        if (spawnFailed) return;
         if (managed) managed.child = undefined;
         this.recordRuntimeLog({
           sessionId: input.sessionId,
@@ -668,6 +766,9 @@ export class WorkerSupervisor {
     const allWorkItems = this.store.listWorkItems({ sessionId: input.sessionId, phaseNumber: input.phaseNumber }).workItems;
     const warnings: string[] = [];
     const blockingIssues: string[] = [];
+    if (!summary.sessionWorkspacePath) {
+      blockingIssues.push("Session is missing sessionWorkspacePath; create_session must include sessionWorkspacePath before workers can be planned as launch-ready or launched.");
+    }
     if (workers.length > 1 && workers.length > allWorkItems.length && allWorkItems.length > 0) {
       warnings.push(
         `Phase ${input.phaseNumber} has ${workers.length} workers for ${allWorkItems.length} work items; confirm the split is independent enough to justify the extra coordination overhead.`
@@ -754,6 +855,7 @@ export class WorkerSupervisor {
     cwd: string;
     sessionWorkspacePath?: string;
     resumeSessionId?: string;
+    otelFilePath?: string;
   }): AdapterLaunch {
     if (input.cli === "fake") {
       if (!this.options.fakeCliPath) throw new Error("TEAMWORK_FAKE_CLI_PATH is required for fake workers");
@@ -786,7 +888,10 @@ export class WorkerSupervisor {
         args.push(...this.copilotShareArgs({ cwd: input.cwd, sessionWorkspacePath: input.sessionWorkspacePath }));
         args.push("--no-ask-user", "--no-auto-update", "--no-remote", "--add-dir", input.cwd);
         args.push(...this.copilotMcpArgs({ cwd: input.cwd, sessionWorkspacePath: input.sessionWorkspacePath }));
-        return this.withTeamworkMcpEnv(this.adapterCommand(command, args, "ignore"));
+        return this.withCopilotObservabilityEnv(
+          this.withTeamworkMcpEnv(this.adapterCommand(command, args, "ignore")),
+          input.otelFilePath
+        );
       }
       const args = ["-p", input.prompt];
       if (input.resumeSessionId && input.mode !== "oneshot") args.push("--resume", input.resumeSessionId);
@@ -794,7 +899,10 @@ export class WorkerSupervisor {
       args.push(...this.copilotShareArgs({ cwd: input.cwd, sessionWorkspacePath: input.sessionWorkspacePath }));
       args.push("--no-ask-user", "--no-auto-update", "--no-remote", "--add-dir", input.cwd);
       args.push(...this.copilotMcpArgs({ cwd: input.cwd, sessionWorkspacePath: input.sessionWorkspacePath }));
-      return this.withTeamworkMcpEnv(this.adapterCommand(command, args, "ignore"));
+      return this.withCopilotObservabilityEnv(
+        this.withTeamworkMcpEnv(this.adapterCommand(command, args, "ignore")),
+        input.otelFilePath
+      );
     }
     if (input.cli === "claude") {
       const command = process.env.TEAMWORK_CLAUDE_BIN ?? "claude";
@@ -877,6 +985,7 @@ export class WorkerSupervisor {
     input: string;
     cwd?: string;
     sessionWorkspacePath?: string;
+    otelFilePath?: string;
   }): AdapterLaunch {
     if (input.cli === "codex") {
       if (!input.cliSessionId) throw new Error("Codex resume requires a captured CLI session id");
@@ -905,7 +1014,10 @@ export class WorkerSupervisor {
       ];
       if (input.cwd) args.push("--add-dir", input.cwd);
       args.push(...this.copilotMcpArgs({ cwd: input.cwd, sessionWorkspacePath: input.sessionWorkspacePath }));
-      return this.withTeamworkMcpEnv(this.adapterCommand(process.env.TEAMWORK_COPILOT_BIN ?? "copilot", args, "ignore"));
+      return this.withCopilotObservabilityEnv(
+        this.withTeamworkMcpEnv(this.adapterCommand(process.env.TEAMWORK_COPILOT_BIN ?? "copilot", args, "ignore")),
+        input.otelFilePath
+      );
     }
     if (input.cli === "claude") {
       if (!input.cliSessionId) throw new Error("Claude resume requires a captured CLI session id");
@@ -1010,6 +1122,21 @@ export class WorkerSupervisor {
     };
   }
 
+  private withCopilotObservabilityEnv(launch: AdapterLaunch, otelFilePath?: string): AdapterLaunch {
+    if (!otelFilePath) return launch;
+    mkdirSync(path.dirname(otelFilePath), { recursive: true });
+    return {
+      ...launch,
+      env: {
+        ...launch.env,
+        COPILOT_OTEL_ENABLED: "true",
+        COPILOT_OTEL_EXPORTER_TYPE: "file",
+        COPILOT_OTEL_FILE_EXPORTER_PATH: otelFilePath,
+        OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false",
+      },
+    };
+  }
+
   private copilotMcpArgs(input: { cwd?: string; sessionWorkspacePath?: string }) {
     const configPath = this.writeCopilotMcpConfig(input);
     const args = ["--additional-mcp-config", `@${configPath}`];
@@ -1026,6 +1153,15 @@ export class WorkerSupervisor {
     const workspaceName = input.cwd ? path.basename(path.resolve(input.cwd)) : "worker";
     const exportPath = path.join(exportDir, `${workspaceName}-${Date.now()}-${process.pid}.md`);
     return ["--share", exportPath];
+  }
+
+  private copilotOtelFilePath(input: { cwd?: string; sessionWorkspacePath?: string; agentAlias: string }) {
+    const baseDir = input.sessionWorkspacePath
+      ? path.resolve(input.sessionWorkspacePath, "usage", "copilot")
+      : path.resolve(input.cwd ?? process.cwd(), ".teamwork", "usage", "copilot");
+    mkdirSync(baseDir, { recursive: true });
+    const safeAlias = input.agentAlias.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "worker";
+    return path.join(baseDir, `${safeAlias}-${Date.now()}-${process.pid}.otel.jsonl`);
   }
 
   private writeCopilotMcpConfig(input: { cwd?: string; sessionWorkspacePath?: string }) {
@@ -1268,12 +1404,15 @@ export class WorkerSupervisor {
       "- Do not run package installs, repo-wide builds, typechecks, or test suites unless the parent explicitly assigned that validation work to you.",
       "- DO NOT USE ANY SKILL OR MCP EVER except the teamwork MCP, which is mandatory. Only use additional MCPs listed in ALLOWED_AGENT_MCPS and only use skills listed in ALLOWED_SKILLS. If either list is none, there are no exceptions for that category.",
       "- Use only the teamwork MCP tool for coordination: list_agents, wait_for_messages/list_messages, ack_messages, send_message, claim_work_item, update_work_item_status, record_result.",
+      "- wait_for_messages duration option is waitMs. timeout, timeoutMs, and timeoutSeconds are accepted as compatibility aliases, but prefer waitMs in new calls.",
       "- Before detailed work, choose exactly one assignedQueue item and call claim_work_item with its exact workItemId; then work only that claimed item until you record_result or block it.",
+      "- Avoid recursive/global searches in .aa, .teamwork, worker-session-exports, worker-mcp-config, node_modules, dist, build, bin, and obj; those folders contain generated files, symlinks, or session artifacts that can cause permission and IO noise.",
       "- Confirm your registered worktree with list_worktrees if needed; do not call register_worktree because that is parent-only.",
       "- Use the roster as your ownership map. If another worker's specialty/responsibility clearly owns knowledge you need, ask that worker directly through MCP instead of rediscovering that domain; do not message others for routine facts inside your own slice. If you lose roster context, call list_agents.",
       "- The parent owns default validation and TDD loops. If you did not run slice-local verification, say that plainly in verificationSummary instead of implying tests passed.",
       "- For code changes, leave a clean commit in your worktree and record_result with resultType \"commit\", commitSha, and verificationSummary before handoff.",
       "- For review or validation-only slices, record_result with resultType \"note\" and a concise string or JSON-object data payload.",
+      "- For validation slices, preserve the exact candidate IDs/numbers from the parent prompt. Do not introduce new finding IDs unless the parent explicitly asks for new discovery.",
       "- Do not create or commit Copilot/CLI session artifacts such as copilot-session-*.md in WORKSPACE_DIR.",
       "- After the slice is complete, remain logically idle/resumable and continue checking Teamwork messages until final teardown.",
       "teamRoster:",

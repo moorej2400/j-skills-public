@@ -18,8 +18,7 @@ export function RecentSessionsList({
   onKilled?: (result: KillSessionResult) => void;
 }): JSX.Element | null {
   // Auto-expand when only a handful of recent sessions (review M15 UX);
-  // larger lists default to collapsed so the dashboard doesn't push the
-  // charts off-screen.
+  // larger lists default to collapsed so the sessions page stays compact.
   const [open, setOpen] = useState(sessions.length <= 5);
   const nowMs = useNow();
   // Stable per-instance id so the trigger can `aria-controls` the region. AT

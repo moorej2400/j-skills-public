@@ -48,6 +48,7 @@ describe("teamwork-mcp single tool API and server-managed workers", () => {
     assert.ok(help.operations.includes("get_session_resume_packet"));
     assert.ok(help.operations.includes("plan_launch"));
     assert.ok(help.operations.includes("launch_worker"));
+    assert.ok(help.operations.includes("parent_poll_baseline"));
     assert.ok(help.operations.includes("parent_poll"));
     assert.equal("examples" in help, false);
 
@@ -135,37 +136,87 @@ describe("teamwork-mcp single tool API and server-managed workers", () => {
       }, 3033),
       /Use "note"/
     );
-    await assert.rejects(
-      () => callTool(sid, "teamwork", {
+    const aliasWait = await callTool(sid, "teamwork", {
         tool_name: "wait_for_messages",
         options: {
           sessionId: "00000000-0000-4000-8000-000000000000",
           actorToken: "worker",
           timeoutMs: 1000,
         },
-      }, 3034),
-      /waitMs/
-    );
-    await assert.rejects(
-      () => callTool(sid, "teamwork", {
+      }, 3034).catch((error) => error);
+    assert.match(String(aliasWait), /Unknown actor token|Unknown session|Actor token does not belong|No active session/);
+    const messageIdAck = await callTool(sid, "teamwork", {
         tool_name: "ack_messages",
         options: {
           sessionId: "00000000-0000-4000-8000-000000000000",
           actorToken: "worker",
           messageIds: ["00000000-0000-4000-8000-000000000000"],
         },
-      }, 3035),
-      /upToSequence/
-    );
-    await assert.rejects(
-      () => callTool(sid, "teamwork", {
+      }, 3035).catch((error) => error);
+    assert.match(String(messageIdAck), /Unknown actor token|Unknown session|Actor token does not belong|No active session/);
+    const readOnlyActorToken = await callTool(sid, "teamwork", {
         tool_name: "list_worktrees",
         options: {
           sessionId: "00000000-0000-4000-8000-000000000000",
           actorToken: "worker",
         },
-      }, 3036),
-      /sessionId and optional agentId only/
+      }, 3036).catch((error) => error);
+    assert.match(String(readOnlyActorToken), /Unknown session|No active session/);
+  });
+
+  it("blocks worker launch preflight when the session has no workspace path", async () => {
+    const session = await callTool(sid, "tw_create_session", {
+      parentAlias: "parent",
+      title: "Missing workspace preflight",
+      taskSlug: "missing-workspace-preflight",
+      projectRoot: tmpDir,
+      taskPrompt: "Verify plan_launch does not report ready without sessionWorkspacePath.",
+    }, 3038);
+    const parent = await callTool(sid, "tw_register_agent", {
+      sessionId: session.sessionId,
+      alias: "parent",
+      specialty: "orchestrator",
+      cli: "codex",
+      model: "gpt-5",
+      role: "parent",
+    }, 3039);
+    const worker = await callTool(sid, "tw_register_agent", {
+      sessionId: session.sessionId,
+      alias: "worker-a",
+      specialty: "implementation",
+      cli: "fake",
+      model: "fake-worker",
+      role: "worker",
+    }, 3040);
+    const worktreePath = path.join(tmpDir, "missing-workspace-preflight", "worker-a");
+    mkdirSync(worktreePath, { recursive: true });
+    await callTool(sid, "tw_register_worktree", {
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: worker.agentId,
+      path: worktreePath,
+      branch: "tw-missing-workspace",
+      status: "ready",
+    }, 3041);
+    await callTool(sid, "tw_start_phase", {
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Launch",
+      goal: "Verify workspace preflight.",
+    }, 3042);
+    const plan = await callTool(sid, "teamwork", {
+      tool_name: "plan_launch",
+      options: { sessionId: session.sessionId, actorToken: parent.token, phaseNumber: 1 },
+    }, 3043);
+    assert.equal(plan.readyToLaunch, false);
+    assert.ok(plan.blockingIssues.some((issue: string) => issue.includes("sessionWorkspacePath")));
+    await assert.rejects(
+      () => callTool(sid, "teamwork", {
+        tool_name: "launch_phase_workers",
+        options: { sessionId: session.sessionId, actorToken: parent.token, phaseNumber: 1 },
+      }, 3044),
+      /sessionWorkspacePath/
     );
   });
 
@@ -299,6 +350,17 @@ describe("teamwork-mcp single tool API and server-managed workers", () => {
     assert.equal(parentPoll.readiness.phaseCanBeginIntegration, true);
     assert.equal(parentPoll.readiness.nextSuggestedOperation, "begin_integration");
     assert.equal(parentPoll.workers.find((entry: any) => entry.agentId === worker.agentId)?.status, "idle");
+    const parentPollBaseline = await callTool(sid, "teamwork", {
+      tool_name: "parent_poll_baseline",
+      options: { sessionId, actorToken: parent.token },
+    }, 31211);
+    assert.equal(parentPollBaseline.readiness.phaseCanBeginIntegration, true);
+    assert.equal(parentPollBaseline.readiness.nextSuggestedOperation, "begin_integration");
+    assert.equal(parentPollBaseline.counts.workerProcesses.missingResumeIds, 0);
+    assert.equal(parentPollBaseline.readiness.hasMissingResumeIds, false);
+    assert.deepEqual(parentPollBaseline.agents, [{ alias: "worker-a", status: "idle" }]);
+    assert.equal("workers" in parentPollBaseline, false);
+    assert.equal("workItems" in parentPollBaseline, false);
     await callTool(sid, "tw_send_message", {
       sessionId,
       actorToken: parent.token,
@@ -1296,6 +1358,11 @@ process.stderr.write("Session exported to: C:/tmp/copilot-session-cp_test_sessio
       }, 389);
       assert.ok(diagnostics.handoffs.fallbackCandidates.some((entry: any) => entry.excerpt.includes("Fallback handoff summary")));
       assert.ok(diagnostics.runtimes.some((runtime: any) => runtime.runtimeId === launched.runtimeId && runtime.sessionExportPath?.includes("copilot-session-cp_test_session.md")));
+      assert.ok(diagnostics.runtimes.some((runtime: any) =>
+        runtime.runtimeId === launched.runtimeId
+        && runtime.status === "exited"
+        && runtime.logicalStatus === "resumable-idle"
+      ));
       const debugEvents = await callTool(localSid, "teamwork", {
         tool_name: "list_debug_events",
         options: { sessionId, limit: 1000 },
@@ -1309,6 +1376,102 @@ process.stderr.write("Session exported to: C:/tmp/copilot-session-cp_test_sessio
     } finally {
       if (localServer) stopServer(localServer, s.tmpDir);
       copilot.cleanup();
+    }
+  });
+
+  it("marks missing Gemini launches as crashed without killing the server", async () => {
+    const s = await startServer({
+      TEAMWORK_FAKE_CLI_PATH: fakeCli.cliPath,
+      TEAMWORK_GEMINI_BIN: "definitely-missing-gemini-cli",
+    });
+    let localServer: ChildProcess | undefined = s.server;
+    try {
+      await s.waitReady();
+      const localSid = await initSession("gemini-launch-failure-client");
+      const workspace = path.join(s.tmpDir, "gemini-missing-session");
+      const worktreePath = path.join(workspace, "worktrees", "worker-a");
+      mkdirSync(worktreePath, { recursive: true });
+
+      const session = await callTool(localSid, "tw_create_session", {
+        parentAlias: "parent",
+        title: "Missing Gemini launch test",
+        taskSlug: "missing-gemini-launch",
+        projectRoot: s.tmpDir,
+        sessionWorkspacePath: workspace,
+        taskPrompt: "Verify a missing Gemini binary does not crash the teamwork server.",
+      }, 391);
+      const sessionId = session.sessionId;
+      const parent = await callTool(localSid, "tw_register_agent", {
+        sessionId,
+        alias: "parent",
+        specialty: "orchestrator",
+        cli: "codex",
+        model: "gpt-5",
+        role: "parent",
+      }, 392);
+      const worker = await callTool(localSid, "tw_register_agent", {
+        sessionId,
+        alias: "gemini-a",
+        specialty: "gemini reviewer",
+        cli: "gemini",
+        model: "gemini-2.5-pro",
+        role: "worker",
+      }, 393);
+      const worktree = await callTool(localSid, "tw_register_worktree", {
+        sessionId,
+        actorToken: parent.token,
+        agentId: worker.agentId,
+        path: worktreePath,
+        branch: "tw-gemini-a",
+        status: "ready",
+      }, 394);
+      await callTool(localSid, "tw_start_phase", {
+        sessionId,
+        actorToken: parent.token,
+        phaseNumber: 1,
+        title: "Gemini launch",
+        goal: "Keep the server alive when Gemini is unavailable.",
+      }, 395);
+
+      const launched = await callTool(localSid, "teamwork", {
+        tool_name: "launch_worker",
+        options: {
+          sessionId,
+          actorToken: parent.token,
+          agentId: worker.agentId,
+          worktreeId: worktree.worktreeId,
+          phaseNumber: 1,
+          launchMode: "persistent-stdin",
+        },
+      }, 396);
+
+      let crashedRuntime: any;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const processes = await callTool(localSid, "teamwork", {
+          tool_name: "list_worker_processes",
+          options: { sessionId, actorToken: parent.token },
+        }, 397 + attempt);
+        crashedRuntime = processes.runtimes.find((runtime: any) => runtime.runtimeId === launched.runtimeId);
+        if (crashedRuntime?.status === "crashed") break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      assert.equal(crashedRuntime?.status, "crashed");
+
+      const log = await callTool(localSid, "teamwork", {
+        tool_name: "get_worker_log",
+        options: { sessionId, actorToken: parent.token, runtimeId: launched.runtimeId, mode: "all", limit: 20 },
+      }, 430);
+      assert.ok(log.events.some((entry: any) => entry.text.includes("process failed to start")));
+      assert.ok(log.events.some((entry: any) => entry.text.includes("definitely-missing-gemini-cli")));
+
+      const poll = await callTool(localSid, "teamwork", {
+        tool_name: "parent_poll",
+        options: { sessionId, actorToken: parent.token },
+      }, 431);
+      assert.equal(poll.session.sessionId, sessionId);
+    } finally {
+      if (localServer) stopServer(localServer, s.tmpDir);
     }
   });
 

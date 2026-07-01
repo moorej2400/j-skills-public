@@ -1,17 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
-import { getMetrics, getSessionDetail, isAbortError, listSessions } from "@/lib/api";
+import { getSessionDetail, isAbortError, listSessions } from "@/lib/api";
 import { useDashboardStream } from "@/lib/sse";
 import { useSessionStore } from "@/store/sessionStore";
-import type { Agent, Metrics, SessionSummary } from "@/lib/types";
-import { MetricsBar } from "@/components/dashboard/MetricsBar";
+import type { Agent } from "@/lib/types";
 import { SessionsGrid } from "@/components/dashboard/SessionsGrid";
-import { SessionsChart } from "@/components/dashboard/SessionsChart";
-import { MessagesChart } from "@/components/dashboard/MessagesChart";
 import { RecentSessionsList } from "@/components/dashboard/RecentSessionsList";
 import { SectionLabel } from "@/components/ui/section-label";
-import { DASHBOARD_METRICS_INTERVAL_MS } from "@/lib/constants";
+import { partitionSessions } from "@/lib/dashboardPresence";
 
 export default function DashboardPage(): JSX.Element {
   const setSummaries = useSessionStore((s) => s.setSummaries);
@@ -21,7 +18,6 @@ export default function DashboardPage(): JSX.Element {
   const detailsMap = useSessionStore((s) => s.details);
   const dashboardActivity = useSessionStore((s) => s.dashboardActivity);
 
-  const [metrics, setMetrics] = useState<Metrics | undefined>(undefined);
   const [loading, setLoading] = useState(true);
 
   // Per-page document title — mirrors SessionPage's "● N busy" prefix so a
@@ -30,24 +26,23 @@ export default function DashboardPage(): JSX.Element {
   // signal the dashboard sorts by.
 
   // -------------------------------------------------------------------------
-  // Initial REST fetch + per-30s metrics poll. The previous implementation
-  // re-fetched everything on every SSE event (review C1) — with even a small
-  // fleet that was 7+ HTTP requests per 500ms tick. Now: list + details once,
-  // metrics on a fixed interval, and SSE drives all incremental state via
-  // `applyEvent`. (The session-list event triggers a list refresh; per-session
-  // detail refreshes only happen on `result`/`checkpoint` events for the
-  // affected session.)
+  // Initial REST fetch. The previous implementation re-fetched everything on
+  // every SSE event (review C1) — with even a small fleet that was 7+ HTTP
+  // requests per 500ms tick. Now: list + details once, and SSE drives all
+  // incremental state via `applyEvent`. (The session-list event triggers a list
+  // refresh; per-session detail refreshes only happen on `result`/`checkpoint`
+  // events for the affected session.)
   // -------------------------------------------------------------------------
   useEffect(() => {
     const ac = new AbortController();
     const run = async () => {
       try {
-        const [summaries, m] = await Promise.all([
-          listSessions({ includeStopped: true, sinceDays: 14, signal: ac.signal }),
-          getMetrics(14, ac.signal),
-        ]);
+        const summaries = await listSessions({
+          includeStopped: true,
+          sinceDays: 14,
+          signal: ac.signal,
+        });
         setSummaries(summaries);
-        setMetrics(m);
         // Pull session details in parallel so we can render agent dots. Cheap
         // SQLite reads against the shared WAL, but still — only on initial load.
         const detailResults = await Promise.allSettled(
@@ -65,24 +60,6 @@ export default function DashboardPage(): JSX.Element {
     void run();
     return () => ac.abort();
   }, [setSummaries, mergeDetail]);
-
-  // Metrics ticker: fixed 30s interval is enough for daily-aggregate charts
-  // (the only thing metrics powers right now) and removes the per-event
-  // refetch storm.
-  useEffect(() => {
-    const ac = new AbortController();
-    const id = window.setInterval(() => {
-      getMetrics(14, ac.signal)
-        .then((m) => setMetrics(m))
-        .catch((err) => {
-          if (!isAbortError(err)) console.error("[dashboard] metrics refresh failed", err);
-        });
-    }, DASHBOARD_METRICS_INTERVAL_MS);
-    return () => {
-      ac.abort();
-      window.clearInterval(id);
-    };
-  }, []);
 
   // Track in-flight session detail refreshes to coalesce bursts (e.g. several
   // `result` events in quick succession on the same session). One outstanding
@@ -179,16 +156,6 @@ export default function DashboardPage(): JSX.Element {
     [allSessions, agentsBySession],
   );
 
-  const { agentsBusy, agentsTotal } = useMemo(() => {
-    let busy = 0;
-    let total = 0;
-    for (const agents of Object.values(agentsBySession)) {
-      total += agents.length;
-      for (const a of agents) if (a.status.state === "busy") busy += 1;
-    }
-    return { agentsBusy: busy, agentsTotal: total };
-  }, [agentsBySession]);
-
   // Adapter maps for the grid. Pull the activity slice out of the store and
   // shape it for the existing prop API (could be inlined later).
   const { recentMessagesBySession, lastActivityBySession } = useMemo(() => {
@@ -238,14 +205,6 @@ export default function DashboardPage(): JSX.Element {
         </p>
       </motion.header>
 
-      <MetricsBar
-        metrics={metrics}
-        activeSessionCount={activeSessions.length}
-        agentsBusy={agentsBusy}
-        agentsTotal={agentsTotal}
-        loading={loading}
-      />
-
       <section className="space-y-4 rounded-[1.8rem] border border-border-subtle bg-card/45 p-4 sm:p-5">
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div className="space-y-2">
@@ -270,41 +229,9 @@ export default function DashboardPage(): JSX.Element {
         />
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-2">
-        <SessionsChart metrics={metrics} loading={loading} />
-        <MessagesChart metrics={metrics} loading={loading} />
-      </section>
-
       <section>
         <RecentSessionsList sessions={recentSessions} onKilled={handleKilledSession} />
       </section>
     </div>
   );
-}
-
-// Active vs recent partition. Only active sessions with a live worker promote
-// to Live; completed/abandoned/archived sessions always move to Recent even if
-// their parent agent remains active in the store.
-export function partitionSessions(
-  sessions: SessionSummary[],
-  agentsBySession: Record<string, Agent[]>,
-): { activeSessions: SessionSummary[]; recentSessions: SessionSummary[] } {
-  const active: SessionSummary[] = [];
-  const recent: SessionSummary[] = [];
-  for (const s of sessions) {
-    if ((s.status ?? "active") !== "active") {
-      recent.push(s);
-      continue;
-    }
-    const agents = agentsBySession[s.id] ?? [];
-    const hasLiveWorker = agents.some(
-      (a) => a.role !== "parent" && a.status.state !== "stopped",
-    );
-    if (hasLiveWorker) {
-      active.push(s);
-    } else {
-      recent.push(s);
-    }
-  }
-  return { activeSessions: active, recentSessions: recent };
 }

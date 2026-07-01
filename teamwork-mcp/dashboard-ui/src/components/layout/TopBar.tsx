@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/store/sessionStore";
 import { useSseHealth } from "@/lib/sse";
 import { cn } from "@/lib/utils";
+import type { Agent } from "@/lib/types";
+import { countAgentsInLiveSessions, partitionSessions } from "@/lib/dashboardPresence";
 
 // Productized TopBar (review H6 UX). Replaces the dead `pathname` mono row
 // with a real human breadcrumb on the left, a "[N sessions live · M agents
@@ -21,15 +23,14 @@ export function TopBar({ onMenuClick }: { onMenuClick?: () => void }): JSX.Eleme
   const breadcrumb = useMemo(() => crumbsFor(location.pathname), [location.pathname]);
 
   const { liveSessions, busyAgents } = useMemo(() => {
-    let live = 0;
-    let busy = 0;
+    const sessions = Object.values(summaries);
+    const agentsBySession: Record<string, Agent[]> = {};
     for (const detail of Object.values(details)) {
-      const anyLive = detail.agents.some((a) => a.status.state !== "stopped");
-      if (anyLive) live += 1;
-      for (const a of detail.agents) if (a.status.state === "busy") busy += 1;
+      agentsBySession[detail.session.id] = detail.agents;
     }
-    if (live === 0) live = Object.keys(summaries).length;
-    return { liveSessions: live, busyAgents: busy };
+    const { activeSessions } = partitionSessions(sessions, agentsBySession);
+    const { agentsBusy } = countAgentsInLiveSessions(activeSessions, agentsBySession);
+    return { liveSessions: activeSessions.length, busyAgents: agentsBusy };
   }, [details, summaries]);
 
   const dotClass =

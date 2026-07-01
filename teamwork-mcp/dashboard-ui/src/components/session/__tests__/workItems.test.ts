@@ -94,6 +94,15 @@ describe("workItems lib", () => {
     expect(grouped["done"]).toEqual([]);
   });
 
+  it("groups items without timestamps without throwing", () => {
+    const items = [
+      makeItem({ workItemId: "a", status: "done", updatedAt: undefined, createdAt: undefined }),
+      makeItem({ workItemId: "b", status: "done", updatedAt: "2026-05-18T00:05:00.000Z" }),
+    ];
+    expect(() => groupByStatus(items)).not.toThrow();
+    expect(groupByStatus(items).done.map((x) => x.workItemId)).toEqual(["b", "a"]);
+  });
+
   it("phaseLabel uses the phase title when available", () => {
     const phases: PhaseBoundary[] = [
       { phaseNumber: 1, title: "Foundations" },

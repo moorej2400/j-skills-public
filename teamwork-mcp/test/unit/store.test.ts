@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 
 import { TeamworkStore } from "../../src/store.js";
 
@@ -642,6 +642,90 @@ test("getAuditReport summarizes per-agent traffic, runtime, and paired-worker DM
     assert.equal(report.pairs[0]?.hasPairTraffic, true);
   } finally {
     cleanup();
+  }
+});
+
+test("getAuditReport rolls up Copilot AI Credit usage per session from OTel files", () => {
+  const { store, cleanup } = createStore();
+  const usageDir = mkdtempSync(path.join(os.tmpdir(), "teamwork-copilot-usage-"));
+  try {
+    const session = store.createSession({
+      parentAlias: "parent",
+      title: "Copilot usage session",
+      taskSlug: "copilot-usage",
+      projectRoot: "/repo",
+    });
+    const parent = store.registerAgent({
+      sessionId: session.sessionId,
+      alias: "parent",
+      specialty: "orchestrator",
+      cli: "codex",
+      model: "gpt-5",
+      role: "parent",
+    });
+    const worker = store.registerAgent({
+      sessionId: session.sessionId,
+      alias: "copilot-a",
+      specialty: "backend",
+      cli: "copilot",
+      model: "gpt-5",
+      role: "worker",
+    });
+    const otelFilePath = path.join(usageDir, "copilot-a.otel.jsonl");
+    writeFileSync(
+      otelFilePath,
+      `${JSON.stringify({
+        resourceSpans: [
+          {
+            scopeSpans: [
+              {
+                spans: [
+                  {
+                    name: "chat gpt-5",
+                    attributes: [
+                      { key: "github.copilot.aiu", value: { doubleValue: 12.345 } },
+                      { key: "github.copilot.cost", value: { doubleValue: 0.12345 } },
+                      { key: "gen_ai.usage.input_tokens", value: { intValue: 1000 } },
+                      { key: "gen_ai.usage.output_tokens", value: { intValue: 250 } },
+                      { key: "gen_ai.usage.cache_read.input_tokens", value: { intValue: 300 } },
+                      { key: "gen_ai.usage.cache_creation.input_tokens", value: { intValue: 50 } },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      })}\n`
+    );
+
+    const runtime = store.registerRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: worker.agentId,
+      transport: "copilot-cli",
+      adapter: "copilot",
+      otelFilePath,
+    });
+
+    const report = store.getAuditReport(session.sessionId);
+
+    assert.equal(report.rollup.copilotAiCredits, 12.345);
+    assert.equal(report.rollup.copilotCostUsd, 0.12345);
+    assert.equal(report.rollup.copilotInputTokens, 1000);
+    assert.equal(report.rollup.copilotOutputTokens, 250);
+    assert.equal(report.rollup.copilotCacheReadInputTokens, 300);
+    assert.equal(report.rollup.copilotCacheCreationInputTokens, 50);
+    assert.equal(report.rollup.copilotUsageRuntimeCount, 1);
+    assert.equal(report.rollup.copilotUsageSourceCount, 1);
+    assert.equal(report.usage.copilot.sourceCount, 1);
+    assert.equal(report.usage.copilot.runtimes[0]?.runtimeId, runtime.runtimeId);
+    assert.equal(report.usage.copilot.runtimes[0]?.agentAlias, "copilot-a");
+    assert.equal(report.usage.copilot.runtimes[0]?.otelFilePath, otelFilePath);
+    assert.equal(report.usage.copilot.runtimes[0]?.source, "otel-file");
+  } finally {
+    cleanup();
+    rmSync(usageDir, { recursive: true, force: true });
   }
 });
 

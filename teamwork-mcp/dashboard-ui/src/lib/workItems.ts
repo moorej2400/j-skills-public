@@ -88,7 +88,10 @@ export function groupByStatus(items: WorkItem[]): Record<WorkItemStatus, WorkIte
   };
   for (const item of items) out[item.status].push(item);
   for (const key of Object.keys(out) as WorkItemStatus[]) {
-    out[key].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    // Older API payloads may omit timestamps; fall back so sorting never throws.
+    out[key].sort((a, b) =>
+      (b.updatedAt ?? b.createdAt ?? "").localeCompare(a.updatedAt ?? a.createdAt ?? ""),
+    );
   }
   return out;
 }

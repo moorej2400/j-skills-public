@@ -144,6 +144,7 @@ type RuntimeRow = {
   stdin_writable: number;
   resume_supported: number;
   session_export_path: string | null;
+  otel_file_path: string | null;
   last_output_at: string | null;
   started_at: string;
   exited_at: string | null;
@@ -175,6 +176,18 @@ type RuntimeHandoffCandidateRow = {
   has_formal_result: number;
   session_export_path: string | null;
   created_at: string;
+};
+
+type CopilotUsageTotals = {
+  aiCredits: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  turnCount: number;
+  spanCount: number;
+  chatSpanCount: number;
 };
 
 type ResultRow = {
@@ -1076,6 +1089,7 @@ export class TeamworkStore {
     sessionId: string;
     actorToken: string;
     afterSequence: number;
+    limit?: number;
   }) {
     const actor = this.requireActor(input.sessionId, input.actorToken);
     const rows = (actor.role === "parent"
@@ -1107,18 +1121,27 @@ export class TeamworkStore {
           .all(input.sessionId, input.afterSequence, actor.id, actor.id)) as MessageRow[];
 
     this.touchAgent(actor.id);
+    const limitedRows = input.limit === undefined
+      ? rows
+      : rows.slice(0, Math.max(1, Math.min(input.limit, 500)));
 
     return {
-      messages: rows.map((row) => this.mapMessage(row)),
+      messages: limitedRows.map((row) => this.mapMessage(row)),
     };
   }
 
   acknowledgeMessages(input: {
     sessionId: string;
     actorToken: string;
-    upToSequence: number;
+    upToSequence?: number;
+    messageIds?: string[];
   }) {
     const actor = this.requireActor(input.sessionId, input.actorToken);
+    const upToSequence = input.upToSequence ?? this.resolveAckSequenceFromMessageIds({
+      sessionId: input.sessionId,
+      actor,
+      messageIds: input.messageIds ?? [],
+    });
     const now = this.now();
     this.db
       .prepare(
@@ -1126,17 +1149,17 @@ export class TeamworkStore {
          SET last_ack_sequence = ?, last_seen_at = ?, updated_at = ?
          WHERE id = ?`
       )
-      .run(input.upToSequence, now, now, actor.id);
+      .run(upToSequence, now, now, actor.id);
     const resolved = this.db
       .prepare(
         `UPDATE message_obligations
          SET status = 'resolved', resolved_at = ?
          WHERE session_id = ? AND to_agent_id = ? AND kind = 'ack' AND status = 'open'
            AND question_message_id IN (
-             SELECT id FROM messages WHERE session_id = ? AND sequence <= ?
-            )`
+              SELECT id FROM messages WHERE session_id = ? AND sequence <= ?
+             )`
       )
-      .run(now, input.sessionId, actor.id, input.sessionId, input.upToSequence).changes;
+      .run(now, input.sessionId, actor.id, input.sessionId, upToSequence).changes;
     this.recordDebugEvent({
       sessionId: input.sessionId,
       actorAgentId: actor.id,
@@ -1144,7 +1167,7 @@ export class TeamworkStore {
       toolName: "tw_ack_messages",
       payload: {
         agentId: actor.id,
-        upToSequence: input.upToSequence,
+        upToSequence,
         resolvedAckObligations: resolved,
       },
     });
@@ -1805,6 +1828,7 @@ export class TeamworkStore {
     stdinWritable?: boolean;
     resumeSupported?: boolean;
     sessionExportPath?: string;
+    otelFilePath?: string;
   }) {
     const actor = this.requireActor(input.sessionId, input.actorToken);
     const agent = this.requireAgentById(input.agentId);
@@ -1827,9 +1851,9 @@ export class TeamworkStore {
       .prepare(
         `INSERT INTO runtimes (
           id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id, command, cwd,
-          managed_by_server, stdin_writable, resume_supported, session_export_path, last_output_at, started_at, exited_at, exit_code, status,
+          managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path, last_output_at, started_at, exited_at, exit_code, status,
           last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 'running', ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, 'running', ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -1846,6 +1870,7 @@ export class TeamworkStore {
         input.stdinWritable ? 1 : 0,
         input.resumeSupported ? 1 : 0,
         input.sessionExportPath ?? null,
+        input.otelFilePath ?? null,
         now,
         now,
         input.heartbeatIntervalSeconds ?? null,
@@ -1894,6 +1919,7 @@ export class TeamworkStore {
     runtimeId: string;
     cliSessionId?: string;
     sessionExportPath?: string;
+    otelFilePath?: string;
     stdinWritable?: boolean;
     resumeSupported?: boolean;
   }) {
@@ -1912,6 +1938,11 @@ export class TeamworkStore {
       this.db
         .prepare(`UPDATE runtimes SET session_export_path = ?, updated_at = ? WHERE id = ?`)
         .run(input.sessionExportPath, now, input.runtimeId);
+    }
+    if (input.otelFilePath !== undefined) {
+      this.db
+        .prepare(`UPDATE runtimes SET otel_file_path = ?, updated_at = ? WHERE id = ?`)
+        .run(input.otelFilePath, now, input.runtimeId);
     }
     if (input.stdinWritable !== undefined) {
       this.db
@@ -1952,7 +1983,7 @@ export class TeamworkStore {
     const row = this.db
       .prepare(
         `SELECT id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id,
-                command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path,
+                command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path,
                 last_output_at, started_at, exited_at, exit_code, status,
                 last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
          FROM runtimes WHERE id = ?`
@@ -1968,7 +1999,7 @@ export class TeamworkStore {
       ? (this.db
           .prepare(
             `SELECT id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id,
-                    command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path,
+                    command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path,
                     last_output_at, started_at, exited_at, exit_code, status,
                     last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
              FROM runtimes WHERE session_id = ? AND agent_id = ? ORDER BY started_at ASC`
@@ -1977,7 +2008,7 @@ export class TeamworkStore {
       : (this.db
           .prepare(
             `SELECT id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id,
-                    command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path,
+                    command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path,
                     last_output_at, started_at, exited_at, exit_code, status,
                     last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
              FROM runtimes WHERE session_id = ? ORDER BY started_at ASC`
@@ -2431,7 +2462,11 @@ export class TeamworkStore {
              FROM results WHERE session_id = ? ORDER BY created_at ASC`
           )
           .all(input.sessionId) as ResultRow[]);
-    return { results: rows.map((r) => this.mapResult(r)) };
+    const results = rows.map((r) => this.mapResult(r));
+    return {
+      results,
+      synthesis: this.summarizeResultOverlap(results),
+    };
   }
 
   parentPoll(input: {
@@ -2469,15 +2504,15 @@ export class TeamworkStore {
     const workerProcesses = runtimes.filter((runtime) => runtime.managedByServer);
     const staleWorkerProcesses = workerProcesses.filter((runtime) => this.isRuntimeStale(runtime));
     const crashedWorkerProcesses = workerProcesses.filter((runtime) => runtime.status === "crashed");
+    const resumeSupportedMissingSessionIds = workerProcesses.filter((runtime) =>
+      runtime.resumeSupported && !runtime.cliSessionId && runtime.status !== "crashed"
+    );
     const statusGroups = this.groupWorkItemsByStatus(workItems);
     const staleRuntimeIds = new Set(staleWorkerProcesses.map((runtime) => runtime.runtimeId));
-    const isResumableExit = (runtime: (typeof workerProcesses)[number]) =>
-      runtime.status === "exited"
-      && (runtime.launchMode === "resume-command" || Boolean(runtime.cliSessionId));
     const runtimeNeedsAttention = (runtime: (typeof workerProcesses)[number]) =>
       runtime.status === "crashed"
       || staleRuntimeIds.has(runtime.runtimeId)
-      || (runtime.status === "exited" && !isResumableExit(runtime));
+      || (runtime.status === "exited" && runtime.logicalStatus !== "resumable-idle");
     const runtimesByAgent = new Map(workerProcesses.map((runtime) => [runtime.agentId, runtime]));
     const activeClaims = this.listActiveClaimsForSession(input.sessionId);
     const claimAttention = activeClaims
@@ -2541,11 +2576,13 @@ export class TeamworkStore {
       workerProcesses: {
         counts: {
           all: workerProcesses.length,
-          running: workerProcesses.filter((runtime) => runtime.status === "running").length,
+          running: workerProcesses.filter((runtime) => runtime.logicalStatus === "running").length,
+          resumableIdle: workerProcesses.filter((runtime) => runtime.logicalStatus === "resumable-idle").length,
           idle: summary.agents.filter((agent) => agent.role === "worker" && agent.status === "idle").length,
           stale: staleWorkerProcesses.length,
           crashed: crashedWorkerProcesses.length,
           exited: workerProcesses.filter((runtime) => runtime.status === "exited").length,
+          missingResumeIds: resumeSupportedMissingSessionIds.length,
         },
         attention: workerProcesses
           .filter((runtime) => runtimeNeedsAttention(runtime))
@@ -2555,6 +2592,7 @@ export class TeamworkStore {
             agentId: runtime.agentId,
             agentAlias: runtime.agentAlias,
             status: runtime.status,
+            logicalStatus: runtime.logicalStatus,
             launchMode: runtime.launchMode,
             cliSessionId: runtime.cliSessionId,
             lastOutputAt: runtime.lastOutputAt,
@@ -2632,6 +2670,10 @@ export class TeamworkStore {
         hasRequiredOpenObligations,
         hasCrashedWorkers: crashedWorkerProcesses.length > 0,
         hasStaleWorkers: staleWorkerProcesses.length > 0,
+        hasMissingResumeIds: resumeSupportedMissingSessionIds.length > 0,
+        resumeIdHealthWarning: resumeSupportedMissingSessionIds.length > 0
+          ? "Some resume-capable runtimes have not captured CLI session IDs; send_worker_input/restart may fail until session export metadata is captured."
+          : undefined,
         phaseCanBeginIntegration: phaseReadyForIntegration,
         phaseCanComplete: session.status === "active"
           && session.lifecycle_stage === "integrating"
@@ -2647,6 +2689,17 @@ export class TeamworkStore {
         staleParentAttention: phaseReadyForIntegration
           && readyForIntegrationSeconds !== undefined
           && readyForIntegrationSeconds >= staleParentThresholdSeconds,
+        closeoutReady: session.status === "active"
+          && allCurrentWorkItemsDone
+          && allCurrentWorkItemsHaveResults
+          && !hasOpenBlockers
+          && !hasRequiredOpenObligations
+          && unackedBoundaryAgents === 0
+          && staleWorkerProcesses.length === 0
+          && crashedWorkerProcesses.length === 0,
+        closeoutReadyReason: allCurrentWorkItemsDone && allCurrentWorkItemsHaveResults
+          ? "All current phase work items have formal results; parent should run get_closeout_checklist and close the phase/session instead of leaving workers idle."
+          : undefined,
         nextSuggestedOperation: phaseReadyForIntegration
           ? "begin_integration"
           : session.status === "active"
@@ -2658,6 +2711,45 @@ export class TeamworkStore {
             ? "complete_phase"
             : undefined,
       },
+    };
+  }
+
+  parentPollBaseline(input: {
+    sessionId: string;
+    actorToken: string;
+    afterSequence?: number;
+  }) {
+    const poll = this.parentPoll(input);
+    // Baseline polling is the hot supervision path. Keep this payload free of
+    // previews, IDs, message text, result summaries, and work-item titles so a
+    // parent can call it frequently without burning context on drill-down data.
+    return {
+      session: {
+        sessionId: poll.session.sessionId,
+        status: poll.session.status,
+        lifecycleStage: poll.session.lifecycleStage,
+        currentPhaseNumber: poll.currentPhase?.phaseNumber,
+      },
+      agents: poll.workers.map((agent) => ({
+        alias: agent.alias,
+        status: agent.status,
+      })),
+      counts: {
+        workers: poll.workers.length,
+        workerProcesses: poll.workerProcesses.counts,
+        workItems: poll.workItems.counts,
+        results: poll.results.count,
+        messages: {
+          unreadParentMessages: poll.messages.unreadCount,
+          openObligations: poll.messages.openObligationCount,
+          unackedBoundaryAgents: poll.messages.unackedBoundaryAgents,
+        },
+        blockers: {
+          workItems: poll.blockers.workItems.length,
+          agents: poll.blockers.agents.length,
+        },
+      },
+      readiness: poll.readiness,
     };
   }
 
@@ -2794,7 +2886,7 @@ export class TeamworkStore {
     const runtimes = this.db
       .prepare(
         `SELECT id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id,
-                command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path,
+                command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path,
                 last_output_at, started_at, exited_at, exit_code, status,
                 last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
          FROM runtimes
@@ -3057,6 +3149,7 @@ export class TeamworkStore {
       const payload = this.parseDebugPayload(event.payload);
       return payload?.toStatus === "cleanup-needed";
     }).length;
+    const copilotUsage = this.collectCopilotUsage(runtimes, agentById);
     const managedRuntimeExports = runtimes.filter((runtime) => runtime.managed_by_server);
     const missingSessionExports = managedRuntimeExports.filter(
       (runtime) => runtime.status !== "running" && !runtime.session_export_path
@@ -3130,6 +3223,14 @@ export class TeamworkStore {
         blockedWorkerCount: blockedWorkers,
         idleWorkerCount: idleWorkers,
         doneWorkerCount: doneWorkers,
+        copilotAiCredits: copilotUsage.totals.aiCredits,
+        copilotCostUsd: copilotUsage.totals.costUsd,
+        copilotInputTokens: copilotUsage.totals.inputTokens,
+        copilotOutputTokens: copilotUsage.totals.outputTokens,
+        copilotCacheReadInputTokens: copilotUsage.totals.cacheReadInputTokens,
+        copilotCacheCreationInputTokens: copilotUsage.totals.cacheCreationInputTokens,
+        copilotUsageRuntimeCount: copilotUsage.runtimes.length,
+        copilotUsageSourceCount: copilotUsage.sourceCount,
         pairSpecialtyCount: pairMetrics.length,
         pairTrafficSpecialtyCount: pairMetrics.filter((pair) => pair.hasPairTraffic).length,
         workerExecutionStartedAt: firstRuntimeStartedAt,
@@ -3151,6 +3252,9 @@ export class TeamworkStore {
         phaseBoundaries,
       },
       pairs: pairMetrics,
+      usage: {
+        copilot: copilotUsage,
+      },
       agents: Array.from(metricsByAgent.values()).map((metrics) => ({
         ...metrics,
         totalRuntimeSeconds: Number(metrics.totalRuntimeSeconds.toFixed(3)),
@@ -3208,11 +3312,12 @@ export class TeamworkStore {
       : [];
     const runtimesBlocking = input.stage === "final"
       ? this.listRuntimes({ sessionId: input.sessionId }).runtimes
-          .filter((runtime) => runtime.status === "running")
+          .filter((runtime) => runtime.logicalStatus === "running")
           .map((runtime) => ({
             runtimeId: runtime.runtimeId,
             agentAlias: runtime.agentAlias,
             status: runtime.status,
+            logicalStatus: runtime.logicalStatus,
             inputDelivery: runtime.inputDelivery,
             cliSessionId: runtime.cliSessionId,
             lastSeenAt: runtime.lastSeenAt,
@@ -3370,6 +3475,7 @@ export class TeamworkStore {
       adapter: runtime.adapter,
       launchMode: runtime.launchMode,
       status: runtime.status,
+      logicalStatus: runtime.logicalStatus,
       stdinWritable: runtime.stdinWritable,
       resumeSupported: runtime.resumeSupported,
       inputDelivery: runtime.inputDelivery,
@@ -3386,6 +3492,7 @@ export class TeamworkStore {
       session: audit.session,
       generatedAt: this.now(),
       rollup: audit.rollup,
+      usage: audit.usage,
       runtimeExports: audit.exports,
       closeout: this.getCloseoutDiagnostics({
         sessionId,
@@ -3661,7 +3768,7 @@ export class TeamworkStore {
       const runtimeRows = this.db
         .prepare(
           `SELECT id, session_id, agent_id, pid, transport, adapter, launch_mode, cli_session_id,
-                  command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path,
+                  command, cwd, managed_by_server, stdin_writable, resume_supported, session_export_path, otel_file_path,
                   last_output_at, started_at, exited_at, exit_code, status,
                   last_seen_at, heartbeat_interval_seconds, stale_after_seconds, updated_at
            FROM runtimes WHERE session_id = ? ORDER BY started_at DESC`
@@ -3731,6 +3838,8 @@ export class TeamworkStore {
       status: row.status,
       activeClaims: this.getActiveClaimsForWorkItem(row.id).map((claim) => this.mapWorkItemClaim(claim)),
       dependsOnIds: JSON.parse(row.depends_on_ids) as string[],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     };
   }
 
@@ -3746,6 +3855,36 @@ export class TeamworkStore {
       releasedAt: row.released_at ?? undefined,
       releaseReason: row.release_reason ?? undefined,
     };
+  }
+
+  private resolveAckSequenceFromMessageIds(input: {
+    sessionId: string;
+    actor: AgentRow;
+    messageIds: string[];
+  }) {
+    if (input.messageIds.length === 0) {
+      throw new Error("ack_messages requires upToSequence or messageIds");
+    }
+    const placeholders = input.messageIds.map(() => "?").join(",");
+    const visibilityClause = input.actor.role === "parent"
+      ? ""
+      : "AND (target_type = 'broadcast' OR target_agent_id = ? OR sender_agent_id = ?)";
+    const params: unknown[] = [input.sessionId, ...input.messageIds];
+    if (input.actor.role !== "parent") params.push(input.actor.id, input.actor.id);
+    const rows = this.db
+      .prepare(
+        `SELECT id, sequence
+         FROM messages
+         WHERE session_id = ?
+           AND id IN (${placeholders})
+           ${visibilityClause}
+         ORDER BY sequence ASC`
+      )
+      .all(...params) as Array<{ id: string; sequence: number }>;
+    if (rows.length !== input.messageIds.length) {
+      throw new Error("Cannot acknowledge by messageIds because one or more message IDs are unknown or not visible to the actor");
+    }
+    return Math.max(...rows.map((row) => row.sequence));
   }
 
   private mapMessage(row: MessageRow) {
@@ -3808,7 +3947,11 @@ export class TeamworkStore {
           : row.resume_supported
           ? "resume-command"
           : "unsupported",
+      logicalStatus: row.status === "exited" && (row.launch_mode === "resume-command" || Boolean(row.cli_session_id))
+        ? "resumable-idle"
+        : row.status,
       sessionExportPath: row.session_export_path ?? undefined,
+      otelFilePath: row.otel_file_path ?? undefined,
       lastOutputAt: row.last_output_at ?? undefined,
       startedAt: row.started_at,
       exitedAt: row.exited_at ?? undefined,
@@ -3849,6 +3992,61 @@ export class TeamworkStore {
       agentAlias: agent.alias,
       createdAt: row.created_at,
     };
+  }
+
+  private summarizeResultOverlap(results: ReturnType<TeamworkStore["mapResult"]>[]) {
+    const clusters: Array<{
+      key: string;
+      count: number;
+      resultIds: string[];
+      agentAliases: string[];
+      summaries: string[];
+    }> = [];
+    for (const result of results) {
+      const key = this.resultOverlapKey(result.summary);
+      if (!key) continue;
+      let cluster = clusters.find((entry) => entry.key === key);
+      if (!cluster) {
+        cluster = { key, count: 0, resultIds: [], agentAliases: [], summaries: [] };
+        clusters.push(cluster);
+      }
+      cluster.count += 1;
+      cluster.resultIds.push(result.resultId);
+      cluster.agentAliases.push(result.agentAlias);
+      if (cluster.summaries.length < 3) cluster.summaries.push(result.summary);
+    }
+    const likelyDuplicates = clusters
+      .filter((entry) => entry.count > 1)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+      .map((entry) => ({
+        key: entry.key,
+        count: entry.count,
+        resultIds: entry.resultIds,
+        agentAliases: Array.from(new Set(entry.agentAliases)),
+        summaries: entry.summaries,
+      }));
+    return {
+      resultCount: results.length,
+      likelyDuplicateClusters: likelyDuplicates,
+      note: likelyDuplicates.length > 0
+        ? "Cluster overlapping worker results before launching validation; validate canonical findings, not every duplicate wording."
+        : "No obvious duplicate result clusters detected by summary text.",
+    };
+  }
+
+  private resultOverlapKey(summary: string) {
+    const stop = new Set([
+      "the", "and", "for", "with", "from", "this", "that", "found", "likely", "valid",
+      "regression", "regressions", "issue", "issues", "review", "slice", "current", "snapshot",
+    ]);
+    const tokens = summary
+      .toLowerCase()
+      .replace(/[^a-z0-9/.-]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length > 3 && !stop.has(token))
+      .slice(0, 12);
+    return tokens.slice(0, 5).sort().join("|");
   }
 
   private mapCheckpoint(row: CheckpointRow) {
@@ -4534,6 +4732,197 @@ export class TeamworkStore {
     return `\\\\?\\${resolved}`;
   }
 
+  private collectCopilotUsage(
+    runtimes: RuntimeRow[],
+    agentById: Map<string, AgentRow>
+  ) {
+    const runtimeUsage = runtimes
+      .filter((runtime) => runtime.adapter === "copilot")
+      .map((runtime) => {
+        const usage = this.readCopilotOtelUsage(runtime.otel_file_path ?? undefined);
+        return {
+          runtimeId: runtime.id,
+          agentId: runtime.agent_id,
+          agentAlias: agentById.get(runtime.agent_id)?.alias,
+          cliSessionId: runtime.cli_session_id ?? undefined,
+          model: agentById.get(runtime.agent_id)?.model,
+          otelFilePath: runtime.otel_file_path ?? undefined,
+          source: usage.source,
+          missingReason: usage.missingReason,
+          ...usage.totals,
+        };
+      });
+    const totals = runtimeUsage.reduce<CopilotUsageTotals>(
+      (sum, runtime) => ({
+        aiCredits: sum.aiCredits + runtime.aiCredits,
+        costUsd: sum.costUsd + runtime.costUsd,
+        inputTokens: sum.inputTokens + runtime.inputTokens,
+        outputTokens: sum.outputTokens + runtime.outputTokens,
+        cacheReadInputTokens: sum.cacheReadInputTokens + runtime.cacheReadInputTokens,
+        cacheCreationInputTokens: sum.cacheCreationInputTokens + runtime.cacheCreationInputTokens,
+        turnCount: sum.turnCount + runtime.turnCount,
+        spanCount: sum.spanCount + runtime.spanCount,
+        chatSpanCount: sum.chatSpanCount + runtime.chatSpanCount,
+      }),
+      this.emptyCopilotUsageTotals()
+    );
+    return {
+      source: "copilot-otel-file",
+      note: "Totals are parsed from Copilot CLI OpenTelemetry span attributes with prompt/response content capture disabled.",
+      sourceCount: runtimeUsage.filter((runtime) => runtime.source === "otel-file").length,
+      totals: this.roundCopilotUsageTotals(totals),
+      runtimes: runtimeUsage.map((runtime) => ({
+        ...runtime,
+        aiCredits: this.roundMetric(runtime.aiCredits, 3),
+        costUsd: this.roundMetric(runtime.costUsd, 6),
+      })),
+    };
+  }
+
+  private readCopilotOtelUsage(filePath?: string): {
+    source: "otel-file" | "missing";
+    missingReason?: string;
+    totals: CopilotUsageTotals;
+  } {
+    if (!filePath) {
+      return {
+        source: "missing",
+        missingReason: "runtime has no COPILOT_OTEL_FILE_EXPORTER_PATH recorded",
+        totals: this.emptyCopilotUsageTotals(),
+      };
+    }
+    if (!existsSync(filePath)) {
+      return {
+        source: "missing",
+        missingReason: "OTel file does not exist yet",
+        totals: this.emptyCopilotUsageTotals(),
+      };
+    }
+
+    const spans = [];
+    for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        spans.push(...this.extractOtelSpans(JSON.parse(line)));
+      } catch {
+        continue;
+      }
+    }
+    const spanRecords = spans.map((span) => ({
+      span,
+      attrs: this.otelAttributes(span),
+    }));
+    const chatSpans = spanRecords.filter(({ span, attrs }) => this.isCopilotUsageSpan(span, attrs, "chat"));
+    const rootSpans = spanRecords.filter(({ span, attrs }) => this.isCopilotUsageSpan(span, attrs, "invoke_agent"));
+    const fallbackSpans = spanRecords.filter(({ attrs }) =>
+      this.attrNumber(attrs, "github.copilot.aiu") !== undefined
+      || this.attrNumber(attrs, "github.copilot.cost") !== undefined
+      || this.attrNumber(attrs, "gen_ai.usage.input_tokens") !== undefined
+      || this.attrNumber(attrs, "gen_ai.usage.output_tokens") !== undefined
+    );
+    const selected = chatSpans.length > 0 ? chatSpans : rootSpans.length > 0 ? rootSpans : fallbackSpans;
+    const totals = selected.reduce<CopilotUsageTotals>((sum, { span, attrs }) => {
+      const aiu = this.attrNumber(attrs, "github.copilot.aiu");
+      const cost = this.attrNumber(attrs, "github.copilot.cost");
+      return {
+        aiCredits: sum.aiCredits + (aiu ?? (cost !== undefined ? cost * 100 : 0)),
+        costUsd: sum.costUsd + (cost ?? (aiu !== undefined ? aiu / 100 : 0)),
+        inputTokens: sum.inputTokens + (this.attrNumber(attrs, "gen_ai.usage.input_tokens") ?? 0),
+        outputTokens: sum.outputTokens + (this.attrNumber(attrs, "gen_ai.usage.output_tokens") ?? 0),
+        cacheReadInputTokens: sum.cacheReadInputTokens + (this.attrNumber(attrs, "gen_ai.usage.cache_read.input_tokens") ?? 0),
+        cacheCreationInputTokens: sum.cacheCreationInputTokens + (this.attrNumber(attrs, "gen_ai.usage.cache_creation.input_tokens") ?? 0),
+        turnCount: sum.turnCount + (this.attrNumber(attrs, "github.copilot.turn_count") ?? 1),
+        spanCount: sum.spanCount + 1,
+        chatSpanCount: sum.chatSpanCount + (this.isCopilotUsageSpan(span, attrs, "chat") ? 1 : 0),
+      };
+    }, this.emptyCopilotUsageTotals());
+
+    return {
+      source: "otel-file",
+      totals: this.roundCopilotUsageTotals(totals),
+    };
+  }
+
+  private extractOtelSpans(value: unknown): any[] {
+    if (!value || typeof value !== "object") return [];
+    const record = value as any;
+    if (Array.isArray(record)) return record.flatMap((entry) => this.extractOtelSpans(entry));
+    if (record.name && record.attributes) return [record];
+    const resourceSpans = Array.isArray(record.resourceSpans) ? record.resourceSpans : [];
+    if (resourceSpans.length > 0) return resourceSpans.flatMap((entry: any) => this.extractOtelSpans(entry));
+    const scopeSpans = Array.isArray(record.scopeSpans) ? record.scopeSpans : [];
+    if (scopeSpans.length > 0) return scopeSpans.flatMap((entry: any) => this.extractOtelSpans(entry));
+    const spans = Array.isArray(record.spans) ? record.spans : [];
+    return spans.flatMap((entry: any) => this.extractOtelSpans(entry));
+  }
+
+  private otelAttributes(span: any) {
+    const out = new Map<string, unknown>();
+    const attrs = span?.attributes;
+    if (Array.isArray(attrs)) {
+      for (const attr of attrs) {
+        if (!attr?.key) continue;
+        out.set(String(attr.key), this.otelAttributeValue(attr.value));
+      }
+    } else if (attrs && typeof attrs === "object") {
+      for (const [key, value] of Object.entries(attrs)) {
+        out.set(key, this.otelAttributeValue(value));
+      }
+    }
+    return out;
+  }
+
+  private otelAttributeValue(value: unknown): unknown {
+    if (!value || typeof value !== "object") return value;
+    const record = value as Record<string, unknown>;
+    for (const key of ["doubleValue", "intValue", "stringValue", "boolValue"]) {
+      if (record[key] !== undefined) return record[key];
+    }
+    return value;
+  }
+
+  private isCopilotUsageSpan(span: any, attrs: Map<string, unknown>, operation: "chat" | "invoke_agent") {
+    const op = attrs.get("gen_ai.operation.name");
+    const name = String(span?.name ?? "").toLowerCase();
+    return op === operation || name === operation || name.startsWith(`${operation} `);
+  }
+
+  private attrNumber(attrs: Map<string, unknown>, key: string) {
+    const value = attrs.get(key);
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
+  }
+
+  private emptyCopilotUsageTotals(): CopilotUsageTotals {
+    return {
+      aiCredits: 0,
+      costUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      turnCount: 0,
+      spanCount: 0,
+      chatSpanCount: 0,
+    };
+  }
+
+  private roundCopilotUsageTotals(totals: CopilotUsageTotals): CopilotUsageTotals {
+    return {
+      ...totals,
+      aiCredits: this.roundMetric(totals.aiCredits, 3),
+      costUsd: this.roundMetric(totals.costUsd, 6),
+    };
+  }
+
+  private roundMetric(value: number, decimals: number) {
+    return Number(value.toFixed(decimals));
+  }
+
   private collectCopilotSessionEvents(runtimes: Array<{
     runtimeId: string;
     agentAlias?: string;
@@ -4683,6 +5072,8 @@ export class TeamworkStore {
       `- Results: ${report.rollup.resultCount}`,
       `- Active runtimes: ${report.rollup.activeRuntimeCount}`,
       `- Block events: ${report.rollup.blockedStatusEventCount}`,
+      `- Copilot AI Credits: ${report.rollup.copilotAiCredits}`,
+      `- Copilot cost USD: ${report.rollup.copilotCostUsd}`,
       ``,
       `## Agents`,
       ``,
@@ -5200,6 +5591,7 @@ export class TeamworkStore {
         stdin_writable INTEGER NOT NULL DEFAULT 0,
         resume_supported INTEGER NOT NULL DEFAULT 0,
         session_export_path TEXT,
+        otel_file_path TEXT,
         last_output_at TEXT,
         started_at TEXT NOT NULL,
         exited_at TEXT,
@@ -5341,6 +5733,7 @@ export class TeamworkStore {
     this.ensureColumn("runtimes", "stdin_writable", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("runtimes", "resume_supported", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("runtimes", "session_export_path", "TEXT");
+    this.ensureColumn("runtimes", "otel_file_path", "TEXT");
     this.ensureColumn("runtimes", "last_output_at", "TEXT");
     this.db.prepare(`UPDATE sessions SET approved_worktree_roots = '[]' WHERE approved_worktree_roots IS NULL`).run();
     this.db.prepare(`UPDATE runtimes SET last_seen_at = updated_at WHERE last_seen_at = ''`).run();

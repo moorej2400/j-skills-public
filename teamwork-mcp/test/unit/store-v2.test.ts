@@ -394,6 +394,109 @@ test("parent poll aggregates phase monitor state without choosing the next actio
   }
 });
 
+test("parent poll baseline returns only minimal supervision state", () => {
+  const { store, cleanup, session, parent, workerA, workerB } = setupSession();
+  try {
+    store.startPhase({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Monitor loop",
+      goal: "Expose low-context parent polling state.",
+    });
+    const doneItem = store.upsertWorkItem({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Completed slice",
+      description: "Already done.",
+      status: "assigned",
+      ownerAgentId: workerA.agentId,
+    });
+    store.upsertWorkItem({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      phaseNumber: 1,
+      title: "Blocked slice",
+      description: "Needs parent decision.",
+      status: "blocked",
+      ownerAgentId: workerB.agentId,
+    });
+    claimWorkItem(store, session.sessionId, workerA, doneItem.workItemId);
+    store.recordResult({
+      sessionId: session.sessionId,
+      actorToken: workerA.token,
+      workItemId: doneItem.workItemId,
+      resultType: "commit",
+      summary: "Completed with a verbose result summary that baseline must not return.",
+      commitSha: "abc1234",
+      verificationSummary: "tests passed",
+    });
+    const runtime = store.registerRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      agentId: workerB.agentId,
+      transport: "codex-cli",
+      managedByServer: true,
+      heartbeatIntervalSeconds: 30,
+    });
+    store.updateRuntime({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+      runtimeId: runtime.runtimeId,
+      status: "crashed",
+      exitCode: 1,
+    });
+    store.sendMessage({
+      sessionId: session.sessionId,
+      actorToken: workerB.token,
+      target: "agent",
+      targetAgentId: parent.agentId,
+      kind: "question",
+      body: "Need a detailed parent decision that baseline must not return.",
+      requiresResponse: true,
+      obligationKind: "answer",
+      dueStage: "phase",
+    });
+
+    const baseline = store.parentPollBaseline({
+      sessionId: session.sessionId,
+      actorToken: parent.token,
+    });
+    const full = store.parentPoll({ sessionId: session.sessionId, actorToken: parent.token });
+    const baselineJson = JSON.stringify(baseline);
+
+    assert.deepEqual(baseline.agents, [
+      { alias: "api-a", status: "idle" },
+      { alias: "api-b", status: "active" },
+    ]);
+    assert.equal(baseline.session.sessionId, session.sessionId);
+    assert.equal(baseline.session.currentPhaseNumber, 1);
+    assert.equal(baseline.counts.workItems.done, 1);
+    assert.equal(baseline.counts.workItems.blocked, 1);
+    assert.equal(baseline.counts.messages.unreadParentMessages, 1);
+    assert.equal(baseline.counts.messages.openObligations, 1);
+    assert.equal(baseline.counts.workerProcesses.crashed, 1);
+    assert.equal(baseline.readiness.hasOpenBlockers, true);
+    assert.equal(baseline.readiness.hasUnreadParentMessages, true);
+    assert.equal(baseline.readiness.hasCrashedWorkers, true);
+    assert.equal("workers" in baseline, false);
+    assert.equal("workItems" in baseline, false);
+    assert.equal("messages" in baseline, false);
+    assert.equal("results" in baseline, false);
+    assert.equal("blockers" in baseline, false);
+    assert.equal(baselineJson.includes("Completed slice"), false);
+    assert.equal(baselineJson.includes("verbose result summary"), false);
+    assert.equal(baselineJson.includes("detailed parent decision"), false);
+    assert.equal(baselineJson.includes(runtime.runtimeId), false);
+    assert.equal(baselineJson.includes(workerB.agentId), false);
+    assert.equal(baselineJson.includes(workerB.token), false);
+    assert.ok(baselineJson.length < JSON.stringify(full).length / 2);
+  } finally {
+    cleanup();
+  }
+});
+
 test("runtime log reads default to unread events per parent/runtime cursor", () => {
   const { store, cleanup, session, parent, workerA } = setupSession();
   try {

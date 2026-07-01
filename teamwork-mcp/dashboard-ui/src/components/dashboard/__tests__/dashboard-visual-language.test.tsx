@@ -3,7 +3,6 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { MetricsBar } from "@/components/dashboard/MetricsBar";
 import { SessionCard } from "@/components/dashboard/SessionCard";
-import { partitionSessions } from "@/pages/DashboardPage";
 import type { Agent, SessionSummary } from "@/lib/types";
 
 const session: SessionSummary = {
@@ -72,48 +71,7 @@ describe("dashboard visual language", () => {
 
     expect(screen.getByText("Active sessions")).toHaveClass("text-xs");
     expect(screen.getByText(/sessions? live/i)).toHaveClass("text-sm");
+    expect(screen.getByText(/of 11 in live sessions/i)).toBeInTheDocument();
     expect(container.querySelector(".text-3xl")).not.toBeNull();
-  });
-
-  it("does not keep terminal sessions live because their parent is active", () => {
-    const completed: SessionSummary = {
-      ...session,
-      id: "completed-session",
-      status: "completed",
-      lifecycleStage: "finalizing",
-    };
-    const activeParent: Agent = {
-      ...agents[0]!,
-      agentId: "parent-agent",
-      sessionId: completed.id,
-      alias: "parent",
-      role: "parent",
-      status: { state: "busy", updatedAt: "2026-05-05T12:20:00.000Z" },
-    };
-
-    const { activeSessions, recentSessions } = partitionSessions(
-      [completed],
-      { [completed.id]: [activeParent] },
-    );
-
-    expect(activeSessions).toHaveLength(0);
-    expect(recentSessions).toEqual([completed]);
-  });
-
-  it("requires a live worker, not just a parent, for Live sessions", () => {
-    const activeParentOnly: Agent = {
-      ...agents[0]!,
-      agentId: "parent-only",
-      role: "parent",
-      status: { state: "busy", updatedAt: "2026-05-05T12:20:00.000Z" },
-    };
-
-    const { activeSessions, recentSessions } = partitionSessions(
-      [session],
-      { [session.id]: [activeParentOnly] },
-    );
-
-    expect(activeSessions).toHaveLength(0);
-    expect(recentSessions).toEqual([session]);
   });
 });

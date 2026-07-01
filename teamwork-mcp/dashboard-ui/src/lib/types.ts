@@ -270,6 +270,44 @@ export type AgentAuditRecord = {
   lastRuntimeExitedAt?: string;
 };
 
+export type CopilotUsageRuntime = {
+  runtimeId: string;
+  agentId: string;
+  agentAlias?: string;
+  cliSessionId?: string;
+  model?: string;
+  otelFilePath?: string;
+  source: "otel-file" | "missing";
+  missingReason?: string;
+  aiCredits: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  turnCount: number;
+  spanCount: number;
+  chatSpanCount: number;
+};
+
+export type CopilotUsageSummary = {
+  source: string;
+  note: string;
+  sourceCount: number;
+  totals: {
+    aiCredits: number;
+    costUsd: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    turnCount: number;
+    spanCount: number;
+    chatSpanCount: number;
+  };
+  runtimes: CopilotUsageRuntime[];
+};
+
 export type SessionAuditReport = {
   session: {
     id: string;
@@ -293,10 +331,18 @@ export type SessionAuditReport = {
     stoppedRuntimeCount: number;
     crashedRuntimeCount: number;
     totalRuntimeSeconds: number;
+    copilotAiCredits: number;
+    copilotCostUsd: number;
+    copilotInputTokens: number;
+    copilotOutputTokens: number;
+    copilotUsageRuntimeCount: number;
     pairSpecialtyCount: number;
     pairTrafficSpecialtyCount: number;
     firstMessageAt?: string;
     lastMessageAt?: string;
+  };
+  usage?: {
+    copilot: CopilotUsageSummary;
   };
   pairs: Array<{
     specialty: string;

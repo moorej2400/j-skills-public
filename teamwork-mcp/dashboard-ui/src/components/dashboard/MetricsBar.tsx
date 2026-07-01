@@ -77,7 +77,10 @@ export function MetricsBar({
       id: "agents-busy",
       label: "Agents busy",
       value: agentsBusy,
-      sublabel: `of ${agentsTotal} registered`,
+      sublabel:
+        activeSessionCount > 0
+          ? `of ${agentsTotal} in live sessions`
+          : "no live sessions",
       icon: Users,
     },
     {

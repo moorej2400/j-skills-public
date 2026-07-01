@@ -13,12 +13,14 @@ Read this file at worker startup and refer back to it if context gets compacted.
 - Before detailed work, choose exactly one assigned queue item and call `claim_work_item` with its exact `workItemId`. Work only that claimed item until you record a result or block it.
 - Treat your specialty as your main ownership boundary.
 - Do not run package installs, repo-wide builds, typechecks, or test suites unless the parent explicitly assigns that validation work to you.
-- Use the `teamwork` MCP tool with `wait_for_messages` or `list_messages` regularly, then `ack_messages`.
+- Use the `teamwork` MCP tool with `wait_for_messages` or `list_messages` regularly, then `ack_messages`. Prefer `waitMs` for wait duration; compatibility aliases exist, but new calls should not use guessed timeout field names.
+- Avoid recursive/global searches in generated and session folders such as `.aa`, `.teamwork`, `worker-session-exports`, `worker-mcp-config`, `node_modules`, `dist`, `build`, `bin`, and `obj`.
 - Use the roster as your ownership map. If another worker's specialty/responsibility clearly owns knowledge you need, ask that worker directly through MCP instead of rediscovering that domain; do not message others for routine facts inside your own slice. If you lose roster context, call `list_agents`.
 - Put useful rationale in MCP messages, status notes, and result summaries; the server debug log can record those visible artifacts, not hidden chain-of-thought.
 - Answer required MCP messages before phase boundaries.
 - Use `update_work_item_status` for blocked status changes. Do not use it to mark work `in-progress`; claiming is the only worker path into current work.
 - Use `record_result` with `resultType: "commit"`, commit SHA, summary, and verification summary when your assigned coding slice is ready. For review/validation-only slices, use `resultType: "note"` and a plain string or JSON-object summary/data.
+- For validation slices, preserve the exact candidate IDs/numbers supplied by the parent. Do not invent new finding IDs unless the parent explicitly changes the task to discovery.
 - The parent owns the default validation/TDD loop. If you did not run worker-local verification, say that explicitly in `verificationSummary` instead of implying tests passed.
 - Do not create or commit CLI session artifacts such as `copilot-session-*.md` in `WORKSPACE_DIR`.
 - In pair mode, coordinate with your paired worker in the shared worktree and converge on one implementation.

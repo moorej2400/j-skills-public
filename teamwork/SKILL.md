@@ -20,7 +20,7 @@ Once launched, a worker session must stay alive for the full teamwork run unless
 
 The parent calls the single MCP tool as `teamwork({ tool_name, options })`. Operation options must exactly match the MCP schema; unknown or legacy fields are rejected. Use `tool_name: "help"` when exact option fields are needed, then call the real operation directly.
 The parent never builds worker prompt files or launches worker CLIs with shell commands. Provider-specific CLI commands are owned by `teamwork-mcp` adapters.
-The parent never builds custom HTTP polling scripts or background shell monitors for teamwork. The `/mcp` endpoint uses MCP transport semantics, not plain ad hoc JSON polling. Frequent monitoring must stay inside `parent_poll`.
+The parent never builds custom HTTP polling scripts or background shell monitors for teamwork. The `/mcp` endpoint uses MCP transport semantics, not plain ad hoc JSON polling. Frequent monitoring must stay inside `parent_poll_baseline`, with `parent_poll` reserved for extended drill-down. If `parent_poll_baseline.readiness.closeoutReady` is true, stop waiting and run the closeout checklist.
 
 ## Input Contract
 
@@ -178,12 +178,15 @@ Standard worker prompt requirements:
 - Tell the worker that server-managed sessions have runtime registration handled by `teamwork-mcp`.
 - Tell the worker: "DO NOT USE ANY SKILL OR MCP EVER except the teamwork MCP, which is mandatory." Additional MCPs are allowed only when listed in `ALLOWED_AGENT_MCPS`; skills are allowed only when listed in `ALLOWED_SKILLS`; blank/none means no exceptions.
 - Tell the worker to use `wait_for_messages` or `list_messages` through the `teamwork` tool for messages and reassignment.
+- Tell the worker to prefer `waitMs` for `wait_for_messages` and not guess timeout field names.
+- Tell the worker to exclude generated/session folders such as `.aa`, `.teamwork`, `worker-session-exports`, `worker-mcp-config`, `node_modules`, `dist`, `build`, `bin`, and `obj` from broad searches.
 - Tell the worker to choose exactly one assigned queue item, call `claim_work_item` with its exact `workItemId`, and focus only on that claimed item until it records a result or blocks it.
 - Tell the worker to use the roster as its ownership map, call `list_agents` only if it loses roster context, and ask another worker directly only when that worker's specialty/responsibility clearly owns knowledge needed for the current slice.
 - Tell the worker not to stop for ordinary ambiguity and to make reasonable decisions from the prompt, repo, and ownership boundary.
 - Tell the worker to escalate only true hard blockers such as missing credentials, contradictory instructions, or environment failures it cannot unblock itself.
 - Tell the worker to run only focused verification for its assigned slice, not the whole repo/app test suite. If it wrote or changed tests, it should run those specific tests and any directly related build/typecheck needed to validate its changes.
 - Tell the worker to call `record_result` with commit SHA and summary before leaving its current claimed slice.
+- For validation-only workers, tell the worker to preserve the exact candidate IDs/numbers from the parent prompt and not invent extra IDs.
 - Tell the worker that once its current slice is complete it must set its agent status to `idle`, keep the CLI session alive, and continue polling for specialist questions, reassignment, and pair coordination until the parent completes the session or explicitly replaces that worker.
 - In `pair` mode, tell the worker its `PAIR_ROLE` explicitly.
 
@@ -191,6 +194,23 @@ Standard worker prompt requirements:
 
 - `implementer`: primary coder for the shared specialty slice
 - `reviewer-tester`: reviews diffs, adds or extends tests, challenges risky assumptions, and validates the shared work before handoff
+
+## Parent Supervision Contract
+
+After workers are launched, the parent's primary job is live supervision, not passive waiting. The parent MUST keep the teamwork run active and repeat this loop until the phase is ready for integration:
+
+1. Call `parent_poll_baseline`.
+2. Handle unread parent messages, required obligations, blockers, stale workers, crashed workers, and missing handoffs.
+3. Call extended `parent_poll` or detail tools only when the baseline indicates action is needed.
+4. Restart, reassign, replace, pause, or send worker input when the poll state indicates action is needed.
+5. Begin integration when `parent_poll_baseline.readiness.phaseCanBeginIntegration` or `allWorkItemsDone` says the phase is ready; if `readiness.closeoutReady` is already true, immediately call `get_closeout_checklist`.
+6. Otherwise wait roughly `poll_seconds` and poll baseline again.
+
+The parent MUST NOT block on worker CLI completion, wait for "all agents done" outside MCP, stop checking because workers are running, or return a final answer while active work items remain.
+
+If the parent context is compacted, interrupted, or resumed, the first recovery action is `get_session_resume_packet`, followed immediately by `parent_poll_baseline`, then the same supervision loop.
+
+Do not delegate this supervision to a worker, built-in subagent, shell background task, custom HTTP poller, or external monitor. If a future MCP-native parent watchdog exists, it may only remind or resume the parent; it must not make orchestration, integration, or reassignment decisions.
 
 ## Parent Workflow
 
@@ -237,19 +257,20 @@ Detailed behavior:
     - `PAIR_ROLE` when in `pair` mode
 13. Before launching a phase, call `plan_launch` with the same worker selection/options you intend to pass to `launch_phase_workers`. Confirm the previewed CLI, model, reasoning effort, worktree, and work item mapping match the plan. If anything is wrong, fix the roster, worktrees, work items, or launch options before starting processes.
 14. Ask the server to launch every planned worker for the phase concurrently with `launch_phase_workers`, or use `launch_worker` for an explicit replacement. This MUST be a server-managed CLI process/session launch, never a built-in subagent launch. In `pair` mode, pass each worker's `PAIR_ROLE` through `pairRoles` or `pairRole`. Use `reasoningEffort` for one batch-wide effort or `reasoningEffortOverrides`/`modelOverrides` for per-worker launch overrides.
-15. After launch, the parent MUST monitor with `parent_poll` roughly every `poll_seconds` seconds until each active work item has a result, blocker, or reassignment decision. Do not wait indefinitely without polling MCP state. Do not create PowerShell, Python, curl, direct HTTP, or background shell monitors for `/mcp`.
-16. Treat `parent_poll` as the default compact phase monitor. Use detail tools only when the poll shows a need: `get_worker_log` for one worker's unread/tail/full output, `list_worker_processes` for runtime details, `send_worker_input` for parent follow-up, `get_diagnostic_report` for runtime/closeout diagnostics, and `list_messages`/`list_results`/`list_work_items` for focused drill-down. Opt-in poll output previews are capped line previews and exclude prompt text by default.
+15. Immediately after launch, enter the Parent Supervision Contract. The parent MUST call `parent_poll_baseline` roughly every `poll_seconds` seconds and treat each poll as an action point. Do not wait on worker process completion, wait for "all agents done" outside MCP, or let the parent turn go idle while active work items remain. Do not create PowerShell, Python, curl, direct HTTP, or background shell monitors for `/mcp`.
+16. Treat `parent_poll_baseline` as the default compact phase monitor. Use extended `parent_poll` or detail tools only when the baseline shows a need: `get_worker_log` for one worker's unread/tail/full output, `list_worker_processes` for runtime details, `send_worker_input` for parent follow-up, `get_diagnostic_report` for runtime/closeout diagnostics, and `list_messages`/`list_results`/`list_work_items` for focused drill-down. Opt-in poll output previews are capped line previews and exclude prompt text by default.
 17. If a parent session resumes after context compaction, interruption, or lost IDs/tokens, call `get_session_resume_packet` with the `sessionId` before issuing token-gated operations. Use the packet's parent token, active runtime IDs, aliases, work item IDs, and unread message state as the recovery source of truth.
-18. If `parent_poll.readiness.hasUnreadParentMessages`, read/respond before continuing. If it reports stale/crashed workers or blockers, inspect logs and explicitly restart, reassign, replace, or pause the affected work. Avoid repeated worker nudges or status prompts unless `parent_poll` shows staleness, blocking, crash, drift, or a missing handoff.
-19. When `parent_poll.readiness.allWorkItemsDone` is true, stop waiting and move to integration.
+18. If `parent_poll_baseline.readiness.hasUnreadParentMessages`, read/respond before continuing. If it reports stale/crashed workers or blockers, inspect logs and explicitly restart, reassign, replace, or pause the affected work. Avoid repeated worker nudges or status prompts unless `parent_poll_baseline` shows staleness, blocking, crash, drift, or a missing handoff.
+19. When `parent_poll_baseline.readiness.closeoutReady` or `allWorkItemsDone` is true, stop waiting and move to integration/closeout. Resumable-idle runtimes are available for follow-up; they are not a reason to relaunch duplicate workers.
 20. The server captures worker prompts, visible output, errors, final responses, runtime status, and logs; the parent can inspect them with `get_worker_log` and `list_worker_processes`.
 21. Require workers to poll MCP roughly every `poll_seconds` seconds when possible.
 22. Require workers to run only focused verification for their assigned slice and report real results. Workers must not run the full repo/app test suite unless the parent explicitly assigns that as the slice.
 23. Optionally use `inspect_worktree` to check worker progress through MCP instead of manual git inspection.
 24. At phase end, require each coding worker to leave a clean phase commit in its worktree branch, then call `record_result` with `resultType: "commit"`, `commitSha`, and `verificationSummary`. Review-only or validation-only workers use `resultType: "note"`. If a worker produced useful visible output but could not record a formal result, the parent may capture that output with `record_result` as a parent fallback using `resultType: "note"` and `data` as a string or JSON object that names the source log/runtime.
-25. The parent calls `begin_integration`, reviews worker outputs, diffs, and verification results, then integrates worker commits into `main` by merge or cherry-pick without becoming a source-code fixer.
-26. If integration needs source-file edits, merge-conflict resolution beyond trivial command-level integration, or any verification repair, the parent creates a repair work item and delegates that work to a worker or paired workers. The parent reviews the repair result but does not hand-code the source fix locally.
-27. If another phase is needed, the parent refreshes worker worktrees from updated `main`, writes the next phase file, and repeats the phase loop:
+25. Before launching validation workers, call `list_results` and use `synthesis.likelyDuplicateClusters` to collapse overlapping worker findings into canonical candidates. Validate canonical findings once; do not launch separate validation for every duplicate wording.
+26. The parent calls `begin_integration`, reviews worker outputs, diffs, and verification results, then integrates worker commits into `main` by merge or cherry-pick without becoming a source-code fixer.
+27. If integration needs source-file edits, merge-conflict resolution beyond trivial command-level integration, or any verification repair, the parent creates a repair work item and delegates that work to a worker or paired workers. The parent reviews the repair result but does not hand-code the source fix locally.
+28. If another phase is needed, the parent refreshes worker worktrees from updated `main`, writes the next phase file, and repeats the phase loop:
     - `solo`: recreate each worker worktree at the same alias path on a fresh next-phase branch
     - `pair`: recreate each shared specialty worktree once, then re-point both paired workers at it
 28. Reuse the same server-tracked child session IDs per alias after refresh when the CLI adapter supports resume.
@@ -257,7 +278,7 @@ Detailed behavior:
 30. Do not terminate an idle worker just because its current slice is complete while other workers are still active. Session teardown happens only after the parent reaches final integration and cleanup.
 31. After the last integration into `main`, do one final refresh pass so every worker worktree is recreated from the finished `main` and matches the final integrated state.
 32. Verify that each refreshed worktree is up to date with the final `main`, then record the final sync state in `merge-log.md` and `teamwork-task.md`.
-33. Pull `get_audit_report`, write a concise human-readable export to `audit-report.md`, and use the MCP report as the canonical source for session metrics and traffic history. Keep manual audit notes secondary: every final finding or worker outcome must state its evidence source as one of `formal MCP result`, `visible worker/runtime log`, or `parent fallback capture`. Use `get_diagnostic_report` for Copilot host-side diagnostics; when available it includes `session-state/events.jsonl` data instead of buffered VS Code debug logs.
+33. Pull `get_audit_report`, write a concise human-readable export to `audit-report.md`, and use the MCP report as the canonical source for session metrics, traffic history, and Copilot AI Credit usage when Copilot OTel files are present. Keep manual audit notes secondary: every final finding or worker outcome must state its evidence source as one of `formal MCP result`, `visible worker/runtime log`, or `parent fallback capture`. Use `get_diagnostic_report` for Copilot host-side diagnostics; when available it includes usage rollups and `session-state/events.jsonl` data instead of buffered VS Code debug logs.
 34. Remove every teamwork worktree created for the session with `cleanup_worktree` so no worker worktree paths remain under `<output_dir>/<task-slug>/worktrees/`. Do not mark a worktree `removed` until filesystem deletion has actually succeeded.
 35. Shut down worker runtimes only as part of final teardown. For server-managed workers, `complete_session` stops running managed runtimes before completing the session.
 36. Stop only after the planned work, required verification, final sync, audit export, worker teardown, and worktree cleanup are complete.
@@ -316,6 +337,9 @@ High-use operation schema reminders:
 - `register_agent`: include parent-defined `specialty` and `responsibility`; `responsibility` should be one or two sentences explaining what this agent owns.
 - `list_agents`: returns the current roster with agent IDs, aliases, specialties, responsibilities, CLI/model, role, and status.
 - `send_message`: `target` is `broadcast|agent`; `kind` is `status|question|answer|handoff|system`.
+- `parent_poll_baseline`: default low-token parent supervision tick. Returns simple agent statuses, counts, and readiness booleans without previews, message bodies, result summaries, or runtime IDs.
+- `list_results`: includes `synthesis.likelyDuplicateClusters` to help the parent dedupe overlapping worker findings before validation.
+- `parent_poll`: extended parent drill-down. Use after baseline shows unread messages, blockers, stale/crashed workers, phase readiness, or another condition that needs details.
 - `register_worktree`: status is `creating|ready|dirty|merged|failed|removed|cleanup-needed`; use `ready`, not `active`.
 - `get_closeout_checklist`: use before `complete_phase` and `complete_session`; it orders record integration event, obligation resolution, boundary acks, runtime stop, worktree cleanup, and completion.
 - `closeout_ack_workers`: parent-only helper to advance boundary acks for idle/done/inactive or resumable-exited workers without using private worker tokens.
@@ -331,7 +355,7 @@ Use `teamwork-mcp` for:
 - broadcast and DM messaging, including required-response obligations
 - agent status and acknowledgement cursors
 - lifecycle transitions (`begin_integration`, `complete_phase`, `begin_finalizing`, `complete_session`)
-- parent phase monitoring through compact `parent_poll`
+- parent phase monitoring through low-token `parent_poll_baseline` and extended `parent_poll`
 - launch preflight through `plan_launch`
 - parent resume/context recovery through `get_session_resume_packet`
 - worktree path and branch registration (`register_worktree`, `list_worktrees`)

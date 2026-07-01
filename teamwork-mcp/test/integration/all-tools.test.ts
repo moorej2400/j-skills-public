@@ -280,6 +280,15 @@ describe("teamwork-mcp all tools integration", () => {
     assert.equal(workerInbox.messages[0].body, "Phase 1 work has been assigned.");
     assert.equal(workerInbox.messages[1].body, "How is the user model progressing?");
 
+    const limited = await callTool(sid, "tw_list_messages", {
+      sessionId,
+      actorToken: workerToken,
+      afterSequence: 0,
+      limit: 1,
+    }, 1151);
+    assert.equal(limited.messages.length, 1);
+    assert.equal(limited.messages[0].body, "Phase 1 work has been assigned.");
+
     // After sequence of first message, only the DM should appear
     const partial = await callTool(sid, "tw_list_messages", {
       sessionId,
@@ -299,14 +308,30 @@ describe("teamwork-mcp all tools integration", () => {
     }, 1161);
     assert.equal(result.timedOut, false);
     assert.equal(result.messages.length, 2);
+
+    const aliasResult = await callTool(sid, "tw_wait_for_messages", {
+      sessionId,
+      actorToken: workerToken,
+      afterSequence: 9999,
+      waitSeconds: 0,
+    }, 1162);
+    assert.equal(aliasResult.timedOut, true);
+    assert.equal(aliasResult.messages.length, 0);
   });
 
   // ── tw_ack_messages ──────────────────────────────────────────
-  it("tw_ack_messages acknowledges messages up to a sequence", async () => {
+  it("tw_ack_messages acknowledges messages by message ID", async () => {
+    const inbox = await callTool(sid, "tw_list_messages", {
+      sessionId,
+      actorToken: workerToken,
+      afterSequence: 0,
+    }, 1163);
+    const dm = inbox.messages.find((message: any) => message.body === "How is the user model progressing?");
+    assert.ok(dm);
     const result = await callTool(sid, "tw_ack_messages", {
       sessionId,
       actorToken: workerToken,
-      upToSequence: msgSequence,
+      messageIds: [dm.messageId],
     }, 117);
     assert.deepEqual(result, { ok: true });
 
@@ -381,6 +406,16 @@ describe("teamwork-mcp all tools integration", () => {
     assert.equal(listed.worktrees.length, 1);
     assert.equal(listed.worktrees[0].worktreeId, worktreeId);
     assert.equal(listed.worktrees[0].status, "dirty");
+
+    const listedWithIgnoredActorToken = await callTool(sid, "teamwork", {
+      tool_name: "list_worktrees",
+      options: {
+        sessionId,
+        actorToken: parentToken,
+        agentId: workerAgentId,
+      },
+    }, 1241);
+    assert.equal(listedWithIgnoredActorToken.worktrees.length, 1);
   });
 
   // ── tw_register_runtime / tw_update_runtime / tw_list_runtimes ─
@@ -466,6 +501,22 @@ describe("teamwork-mcp all tools integration", () => {
     assert.equal(listed.results[0].resultId, resultId);
     assert.equal(listed.results[0].agentAlias, "frontend");
     assert.equal(listed.results[0].resultType, "test-report");
+    assert.equal(listed.synthesis.resultCount, 1);
+
+    await callTool(sid, "tw_record_result", {
+      sessionId,
+      actorToken: parentToken,
+      workItemId: workItemAId,
+      resultType: "note",
+      summary: "User model implemented and verified in worker worktree via parent fallback capture.",
+      data: "Parent-visible fallback result for duplicate clustering.",
+    }, 1311);
+    const synthesized = await callTool(sid, "tw_list_results", {
+      sessionId,
+      workItemId: workItemAId,
+    }, 1312);
+    assert.equal(synthesized.synthesis.resultCount, 2);
+    assert.ok(synthesized.synthesis.likelyDuplicateClusters.length >= 1);
   });
 
   it("tw_update_work_item_status closes deferred work before integration", async () => {
@@ -551,7 +602,7 @@ describe("teamwork-mcp all tools integration", () => {
     assert.equal(report.rollup.messageCount, 3);
     assert.equal(report.rollup.directMessageCount, 2);
     assert.equal(report.rollup.activeRuntimeCount, 1);
-    assert.equal(report.rollup.resultCount, 1);
+    assert.equal(report.rollup.resultCount, 2);
     const frontend = report.agents.find((agent: any) => agent.alias === "frontend");
     assert.equal(frontend.currentStatus, "idle");
     assert.equal(frontend.messagesSentCount, 0);

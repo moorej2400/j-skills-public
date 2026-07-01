@@ -316,9 +316,22 @@ function registerToolsOn(server: McpServer) {
   );
 
   registerTool(
+    "tw_parent_poll_baseline",
+    {
+      description: "Parent-only low-token monitor. Use this for frequent supervision ticks; call parent_poll only when this baseline shows unread messages, blockers, stale/crashed workers, or phase readiness.",
+      inputSchema: {
+        sessionId: z.string().uuid(),
+        actorToken: z.string().min(1),
+        afterSequence: z.number().int().min(0).optional(),
+      },
+    },
+    async (input) => jsonResult(store.parentPollBaseline(input))
+  );
+
+  registerTool(
     "tw_parent_poll",
     {
-      description: "Parent-only default monitor. Use this for routine phase polling; use get_worker_log, list_worker_processes, list_results, and list_messages only for drill-down when this snapshot shows a need.",
+      description: "Parent-only extended monitor. Use parent_poll_baseline for routine frequent ticks; use this for drill-down when baseline shows unread messages, blockers, stale/crashed workers, or phase readiness.",
       inputSchema: {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
@@ -577,15 +590,16 @@ function registerToolsOn(server: McpServer) {
   registerTool(
     "tw_list_messages",
     {
-      description: "Drill-down only: list teamwork messages visible to the current agent since a sequence number. Parent routine monitoring should use parent_poll.",
+      description: "Drill-down only: list teamwork messages visible to the current agent since a sequence number. Parent routine monitoring should use parent_poll_baseline.",
       inputSchema: {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
         afterSequence: z.number().int().min(0).default(0),
+        limit: z.number().int().positive().max(500).optional(),
       },
     },
-    async ({ sessionId, actorToken, afterSequence }) =>
-      jsonResult(store.listMessagesSince({ sessionId, actorToken, afterSequence }))
+    async ({ sessionId, actorToken, afterSequence, limit }) =>
+      jsonResult(store.listMessagesSince({ sessionId, actorToken, afterSequence, limit }))
   );
 
   registerTool(
@@ -596,11 +610,21 @@ function registerToolsOn(server: McpServer) {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
         afterSequence: z.number().int().min(0).default(0),
-        waitMs: z.number().int().min(0).max(120_000).default(30_000),
+        waitMs: z.number().int().min(0).max(120_000).optional(),
+        timeout: z.number().int().min(0).max(120_000).optional(),
+        timeoutMs: z.number().int().min(0).max(120_000).optional(),
+        timeoutSeconds: z.number().int().min(0).max(120).optional(),
+        waitSeconds: z.number().int().min(0).max(120).optional(),
       },
     },
-    async ({ sessionId, actorToken, afterSequence, waitMs }) => {
-      const deadline = Date.now() + waitMs;
+    async ({ sessionId, actorToken, afterSequence, waitMs, timeout, timeoutMs, timeoutSeconds, waitSeconds }) => {
+      const effectiveWaitMs = waitMs
+        ?? timeoutMs
+        ?? timeout
+        ?? (timeoutSeconds === undefined ? undefined : timeoutSeconds * 1000)
+        ?? (waitSeconds === undefined ? undefined : waitSeconds * 1000)
+        ?? 30_000;
+      const deadline = Date.now() + effectiveWaitMs;
       let result = store.listMessagesSince({ sessionId, actorToken, afterSequence });
       while (result.messages.length === 0 && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now()))));
@@ -631,11 +655,12 @@ function registerToolsOn(server: McpServer) {
       inputSchema: {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
-        upToSequence: z.number().int().min(0),
+        upToSequence: z.number().int().min(0).optional(),
+        messageIds: z.array(z.string().uuid()).optional(),
       },
     },
-    async ({ sessionId, actorToken, upToSequence }) => {
-      store.acknowledgeMessages({ sessionId, actorToken, upToSequence });
+    async ({ sessionId, actorToken, upToSequence, messageIds }) => {
+      store.acknowledgeMessages({ sessionId, actorToken, upToSequence, messageIds });
       return jsonResult({ ok: true });
     }
   );
@@ -757,6 +782,16 @@ function registerToolsOn(server: McpServer) {
         agentId: z.string().uuid(),
         pid: z.number().int().positive().optional(),
         transport: z.string().min(1),
+        adapter: z.string().min(1).optional(),
+        launchMode: z.string().min(1).optional(),
+        cliSessionId: z.string().min(1).optional(),
+        command: z.string().min(1).optional(),
+        cwd: z.string().min(1).optional(),
+        managedByServer: z.boolean().optional(),
+        stdinWritable: z.boolean().optional(),
+        resumeSupported: z.boolean().optional(),
+        sessionExportPath: z.string().min(1).optional(),
+        otelFilePath: z.string().min(1).optional(),
         heartbeatIntervalSeconds: z.number().int().positive().optional(),
       },
     },
@@ -916,7 +951,7 @@ function registerToolsOn(server: McpServer) {
   registerTool(
     "tw_list_results",
     {
-      description: "Drill-down only: list recorded results for a session or one work item. Parent routine monitoring should use parent_poll.",
+      description: "Drill-down only: list recorded results for a session or one work item. Parent routine monitoring should use parent_poll_baseline.",
       inputSchema: {
         sessionId: z.string().uuid(),
         workItemId: z.string().uuid().optional(),
@@ -1179,7 +1214,7 @@ function registerWorkerSupervisorOperations(
   registerTool(
     "get_worker_log",
     {
-      description: "Parent-only drill-down operation to read unread, tail, or full prompt/stdout/stderr/stdin/runtime events for one worker. Use parent_poll for routine monitoring.",
+      description: "Parent-only drill-down operation to read unread, tail, or full prompt/stdout/stderr/stdin/runtime events for one worker. Use parent_poll_baseline for routine monitoring.",
       inputSchema: {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
@@ -1195,7 +1230,7 @@ function registerWorkerSupervisorOperations(
   registerTool(
     "list_worker_processes",
     {
-      description: "Parent-only drill-down operation to list server-managed worker processes for a session. Use parent_poll for routine monitoring.",
+      description: "Parent-only drill-down operation to list server-managed worker processes for a session. Use parent_poll_baseline for routine monitoring.",
       inputSchema: {
         sessionId: z.string().uuid(),
         actorToken: z.string().min(1),
@@ -1274,13 +1309,45 @@ function registerTeamworkTool(server: McpServer, operations: Map<string, {
 
 function parseOperationOptions(operation: { name: string; config: any }, options: Record<string, unknown>) {
   if (!operation.config?.inputSchema) return {};
-  rejectLegacyOrUnknownProneOptions(operationName(operation.name), options);
+  const opName = operationName(operation.name);
+  const normalizedInput = normalizePreParseOptions(opName, options);
+  rejectLegacyOrUnknownProneOptions(opName, normalizedInput);
   const schema = z.object(operation.config.inputSchema).strict();
-  const result = schema.safeParse(options);
+  const result = schema.safeParse(normalizedInput);
   if (!result.success) {
-    throw new Error(`Invalid options for ${operationName(operation.name)}: ${z.prettifyError(result.error)}`);
+    throw new Error(`Invalid options for ${opName}: ${z.prettifyError(result.error)}`);
   }
-  return normalizeParsedOptions(operationName(operation.name), result.data);
+  return normalizeParsedOptions(opName, result.data);
+}
+
+function normalizePreParseOptions(operation: string, options: Record<string, unknown>) {
+  const has = (field: string) => Object.prototype.hasOwnProperty.call(options, field);
+  if (operation === "wait_for_messages" && !has("waitMs")) {
+    const aliasWaitMs = typeof options.timeoutMs === "number"
+      ? options.timeoutMs
+      : typeof options.timeout === "number"
+        ? options.timeout
+        : typeof options.timeoutSeconds === "number"
+          ? options.timeoutSeconds * 1000
+          : typeof options.waitSeconds === "number"
+            ? options.waitSeconds * 1000
+            : undefined;
+    if (aliasWaitMs !== undefined) return { ...options, waitMs: aliasWaitMs };
+  }
+  const actorTokenTolerantReadOnlyOperations = new Set([
+    "get_session_state",
+    "list_agents",
+    "list_work_items",
+    "list_worktrees",
+    "list_results",
+    "list_integration_events",
+    "list_checkpoints",
+  ]);
+  if (actorTokenTolerantReadOnlyOperations.has(operation) && Object.prototype.hasOwnProperty.call(options, "actorToken")) {
+    const { actorToken: _actorToken, ...rest } = options;
+    return rest;
+  }
+  return options;
 }
 
 function rejectLegacyOrUnknownProneOptions(operation: string, options: Record<string, unknown>) {
@@ -1312,14 +1379,8 @@ function rejectLegacyOrUnknownProneOptions(operation: string, options: Record<st
   if (operation === "register_worktree" && options.status === "active") {
     throw new Error('Invalid options for register_worktree: status "active" is not valid. Use "ready" after the worktree exists.');
   }
-  if (operation === "wait_for_messages" && (has("timeout") || has("timeoutMs"))) {
-    throw new Error('Invalid options for wait_for_messages: use waitMs for the long-poll duration. timeout/timeoutMs are not accepted.');
-  }
-  if (operation === "ack_messages" && has("messageIds")) {
-    throw new Error("Invalid options for ack_messages: acknowledge by upToSequence, not by messageIds.");
-  }
-  if (operation === "list_worktrees" && has("actorToken")) {
-    throw new Error("Invalid options for list_worktrees: this read-only operation takes sessionId and optional agentId only.");
+  if (operation === "wait_for_messages" && (has("timeout") || has("timeoutMs") || has("timeoutSeconds") || has("waitSeconds"))) {
+    return;
   }
   if (operation === "launch_worker") {
     if (has("worktreePath") || has("path")) {
@@ -1331,6 +1392,21 @@ function rejectLegacyOrUnknownProneOptions(operation: string, options: Record<st
 function normalizeParsedOptions(operation: string, parsed: any) {
   if (operation === "record_result" && parsed.data !== undefined && typeof parsed.data !== "string") {
     return { ...parsed, data: JSON.stringify(parsed.data) };
+  }
+  if (operation === "wait_for_messages") {
+    const waitMs = parsed.waitMs
+      ?? parsed.timeoutMs
+      ?? parsed.timeout
+      ?? (parsed.timeoutSeconds === undefined ? undefined : parsed.timeoutSeconds * 1000)
+      ?? (parsed.waitSeconds === undefined ? undefined : parsed.waitSeconds * 1000)
+      ?? 30_000;
+    const { timeout, timeoutMs, timeoutSeconds, waitSeconds, ...rest } = parsed;
+    return { ...rest, waitMs };
+  }
+  if (operation === "ack_messages") {
+    if (parsed.upToSequence === undefined && (!Array.isArray(parsed.messageIds) || parsed.messageIds.length === 0)) {
+      throw new Error("Invalid options for ack_messages: provide upToSequence or at least one messageIds entry.");
+    }
   }
   return parsed;
 }
@@ -1344,9 +1420,9 @@ function teamworkToolDescription(operations: string[]) {
     "Run teamwork MCP operations through one documented dispatcher.",
     "Input: { tool_name: string, options: object }. options must exactly match the operation schema; unknown fields are rejected.",
     "Groups: session, agents, phases, work items, messages, worker processes, results, audit/debug, help.",
-    "Common: create_session, register_agent, list_agents, get_session_resume_packet, start_phase, upsert_work_item, claim_work_item, send_message, wait_for_messages, record_result, complete_phase, plan_launch, launch_worker, send_worker_input, get_worker_log, get_diagnostic_report, complete_session.",
+    "Common: create_session, register_agent, list_agents, get_session_resume_packet, start_phase, upsert_work_item, claim_work_item, send_message, wait_for_messages, record_result, parent_poll_baseline, parent_poll, complete_phase, plan_launch, launch_worker, send_worker_input, get_worker_log, get_diagnostic_report, complete_session.",
     "Do not guess legacy fields: use assigneeAgentIds, acceptanceCriteria as string, resultType commit|artifact|test-report|note, status planned|assigned|in-progress|blocked|done|canceled, message kind status|question|answer|handoff|system.",
-    "Frequent monitoring must use parent_poll. Do not build external HTTP/SSE polling scripts against /mcp.",
+    "Frequent monitoring must use parent_poll_baseline; call parent_poll only for drill-down when baseline shows attention is needed. Do not build external HTTP/SSE polling scripts against /mcp.",
     "Use tool_name='help' for the operation catalog or help with options.topic for one operation. Help returns exact option fields, required/optional sets, enum values, and examples.",
     ...coreSchemaSnippets(),
     `Available operations: ${operations.join(", ")}`,
@@ -1417,7 +1493,8 @@ function coreSchemaSnippets() {
     'Schemas: record_result requires sessionId, actorToken, workItemId, resultType: "commit"|"artifact"|"test-report"|"note", summary; data?: string|object; commitSha/commitShas and verificationSummary are optional structured fields. Parent fallback captures visible worker output as resultType "note".',
     'Schemas: send_message requires sessionId, actorToken, target: "broadcast"|"agent", kind: "status"|"question"|"answer"|"handoff"|"system", body; targetAgentId required when target is "agent".',
     'Schemas: register_worktree status?: "creating"|"ready"|"dirty"|"merged"|"failed"|"removed"|"cleanup-needed".',
-    'Schemas: closeout uses get_closeout_checklist, closeout_ack_workers, cleanup_worktree, record_integration_event, complete_phase, and complete_session in that order when blockers require it.',
+    'Schemas: closeout uses get_closeout_checklist, closeout_ack_workers, cleanup_worktree, record_integration_event, complete_phase, and complete_session in that order when blockers require it. parent_poll_baseline reports closeoutReady when all work is done and the next closeout action is due.',
+    'Compatibility: wait_for_messages prefers waitMs, but timeout/timeoutMs/timeoutSeconds/waitSeconds are normalized to waitMs; ack_messages accepts upToSequence or visible messageIds to recover common agent mistakes.',
   ];
 }
 
@@ -1426,10 +1503,11 @@ function isOptionalSchema(schema: unknown) {
 }
 
 function relatedOperations(operation: string) {
+  if (operation === "parent_poll_baseline") return ["parent_poll", "get_worker_log", "list_worker_processes", "list_results", "list_messages", "get_session_resume_packet"];
   if (operation === "parent_poll") return ["get_worker_log", "list_worker_processes", "list_results", "list_messages", "get_session_resume_packet"];
   if (operation === "plan_launch") return ["launch_phase_workers", "launch_worker", "register_worktree", "upsert_work_item"];
   if (operation === "claim_work_item") return ["list_work_items", "record_result", "update_work_item_status"];
-  if (operation.includes("worker")) return ["register_agent", "register_worktree", "upsert_work_item", "send_message", "parent_poll"];
+  if (operation.includes("worker")) return ["register_agent", "register_worktree", "upsert_work_item", "send_message", "parent_poll_baseline"];
   if (operation.includes("message")) return ["wait_for_messages", "ack_messages", "closeout_ack_workers", "resolve_obligation"];
   if (operation.includes("phase")) return ["start_phase", "begin_integration", "record_integration_event", "get_closeout_checklist", "complete_phase"];
   if (operation.includes("session") || operation.includes("closeout")) return ["get_closeout_checklist", "closeout_ack_workers", "cleanup_worktree", "complete_session"];
